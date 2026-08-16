@@ -27,6 +27,13 @@ const WINDOW_MS = WINDOW_SECONDS * 1000;
 // OpusMax resets at 11:58 PM IST = 6:28 PM UTC
 const WINDOW_ANCHOR_UTC_MS = (18 + 28 / 60) * 60 * 60 * 1000; // 18:28 UTC in ms from midnight
 
+function getCurrentWindowEnd() {
+  const now = Date.now();
+  const elapsed = now - WINDOW_ANCHOR_UTC_MS;
+  const periods = Math.ceil(elapsed / WINDOW_MS);
+  return WINDOW_ANCHOR_UTC_MS + periods * WINDOW_MS;
+}
+
 // --- KV helpers ---
 function getShareKey(key) { return `share:${key}`; }
 function getBucketKey(key, windowEnd) { return `bucket:${key}:${windowEnd}`; }
