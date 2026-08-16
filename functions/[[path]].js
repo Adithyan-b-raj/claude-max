@@ -391,6 +391,11 @@ async function proxyRelay(request, env, ctx) {
   }
 
   const body = await request.text();
+
+  // Detect stream mode from request body
+  let isStream = false;
+  try { isStream = JSON.parse(body).stream === true; } catch {}
+
   const upstream = await fetch("https://api.opusmax.pro/v1/messages", {
     method: "POST",
     headers: {
@@ -401,6 +406,65 @@ async function proxyRelay(request, env, ctx) {
     body,
   });
 
+  const contentType = upstream.headers.get("content-type") || "";
+
+  // --- Streaming (SSE): pipe through, parse usage in real-time ---
+  if (isStream && contentType.includes("text/event-stream") && upstream.body) {
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    const reader = upstream.body.getReader();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let buffer = "";
+
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          await writer.write(encoder.encode(chunk));
+
+          // Look for usage in last line of buffer
+          const lines = buffer.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("data: ") && line.includes("\"usage\"")) {
+              try {
+                const evt = JSON.parse(line.slice(6));
+                if (evt.type === "message_start" && evt.message?.usage) {
+                  inputTokens = evt.message.usage.input_tokens || 0;
+                  outputTokens = evt.message.usage.output_tokens || 0;
+                } else if (evt.type === "message_delta" && evt.usage) {
+                  outputTokens = evt.usage.output_tokens || outputTokens;
+                }
+              } catch {}
+            }
+          }
+          // Keep last 2 lines for cross-chunk parsing
+          const keep = lines.slice(-2).join("\n");
+          buffer = keep;
+        }
+        const total = inputTokens + outputTokens;
+        if (total > 0) ctx.waitUntil(updateUsage(env, shareKey, record, total));
+      } catch (e) {
+        // Stream interrupted — best-effort count what we have
+      } finally {
+        await writer.close();
+      }
+    })();
+
+    const headers = new Headers(upstream.headers);
+    headers.set("X-RateLimit-Limit", String(record.tokenLimit));
+    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - record.usedTokens)));
+    headers.set("X-RateLimit-Reset", record.expiresAt);
+
+    return new Response(readable, { status: upstream.status, headers });
+  }
+
+  // --- Non-streaming: buffer and extract usage from JSON ---
   const respBody = await upstream.text();
   let inputTokens = 0,
     outputTokens = 0;
@@ -412,7 +476,7 @@ async function proxyRelay(request, env, ctx) {
       outputTokens = parsed.usage.output_tokens || 0;
     }
   } catch {
-    // streaming or non-JSON — usage comes via SSE events
+    // Non-JSON / unexpected format
   }
 
   const total = inputTokens + outputTokens;
