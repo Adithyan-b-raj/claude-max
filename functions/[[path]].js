@@ -22,16 +22,23 @@ function formatTokens(n) {
 }
 
 // --- Constants ---
-const WINDOW_SECONDS = 5 * 60 * 60; // 5-hour rolling window
-const WINDOW_MS = WINDOW_SECONDS * 1000;
-// OpusMax resets at 11:58 PM IST = 6:28 PM UTC
-const WINDOW_ANCHOR_UTC_MS = (18 + 28 / 60) * 60 * 60 * 1000; // 18:28 UTC in ms from midnight
+const WINDOW_MS = 5 * 60 * 60 * 1000; // 5-hour rolling window in ms
+// OpusMax resets at 11:58 PM IST = 6:28 PM UTC every day
+const WINDOW_ANCHOR_HOURS = 18;
+const WINDOW_ANCHOR_MINUTES = 28;
 
 function getCurrentWindowEnd() {
-  const now = Date.now();
-  const elapsed = now - WINDOW_ANCHOR_UTC_MS;
+  const now = new Date();
+  // Anchor to today at 18:28 UTC (11:58 PM IST)
+  const anchor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), WINDOW_ANCHOR_HOURS, WINDOW_ANCHOR_MINUTES, 0, 0));
+
+  if (now <= anchor) {
+    return anchor.getTime();
+  }
+
+  const elapsed = now - anchor;
   const periods = Math.ceil(elapsed / WINDOW_MS);
-  return WINDOW_ANCHOR_UTC_MS + periods * WINDOW_MS;
+  return anchor.getTime() + periods * WINDOW_MS;
 }
 
 // --- KV helpers ---
