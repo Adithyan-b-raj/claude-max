@@ -83,14 +83,13 @@ function dashboard(keys, adminSecret) {
   const rows = keys
     .map((k) => {
       const pct = k.tokenLimit > 0 ? Math.min(100, (k.usedTokens / k.tokenLimit) * 100) : 0;
-      const color = pct > 90 ? "#ef4444" : pct > 60 ? "#f59e0b" : "#10b981";
       const status = k.revoked
-        ? '<span class="badge revoked">Revoked</span>'
+        ? '<span class="status revoked">Revoked</span>'
         : now > new Date(k.expiresAt).getTime()
-          ? '<span class="badge expired">Expired</span>'
+          ? '<span class="status expired">Expired</span>'
           : pct >= 100
-            ? '<span class="badge exceeded">Cap hit</span>'
-            : '<span class="badge active">Active</span>';
+            ? '<span class="status exceeded">Cap hit</span>'
+            : '<span class="status active">Active</span>';
       const ttl =
         now > new Date(k.expiresAt).getTime()
           ? "expired"
@@ -99,7 +98,7 @@ function dashboard(keys, adminSecret) {
         <td>${escapeHtml(k.name)}</td>
         <td><code>${escapeHtml(k.shareKey)}</code></td>
         <td>${formatTokens(k.usedTokens)} / ${formatTokens(k.tokenLimit)}</td>
-        <td><div class="bar-wrap"><div class="bar" style="width:${pct.toFixed(1)}%;background:${color}"></div></div></td>
+        <td><div class="bar-wrap"><div class="bar" style="width:${pct.toFixed(1)}%"></div></div></td>
         <td>${status}</td>
         <td>${ttl}</td>
         <td class="actions">
@@ -121,43 +120,42 @@ function dashboard(keys, adminSecret) {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>OpusMax Proxy</title>
 <style>
-  :root { --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a; --text: #e4e4e7; --muted: #a1a1aa; --green: #10b981; --amber: #f59e0b; --red: #ef4444; --blue: #2563eb; }
+  :root { --bg: #ffffff; --card: #ffffff; --border: #000000; --text: #000000; --muted: #666666; --line: #e5e5e5; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 24px; line-height: 1.5; }
-  h1 { font-size: 1.25rem; margin-bottom: 16px; font-weight: 600; }
-  h2 { font-size: 1rem; margin-bottom: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .stat { text-align: center; }
-  .stat .value { font-size: 1.75rem; font-weight: 700; }
-  .stat .label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
-  form { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  label { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 0.88rem; outline: none; transition: border-color 0.15s; }
-  input:focus { border-color: var(--blue); }
-  button { border: none; padding: 8px 16px; border-radius: 6px; font-size: 0.85rem; font-weight: 500; cursor: pointer; color: white; background: var(--blue); transition: opacity 0.15s; }
-  button:hover { opacity: 0.85; }
-  button.danger { background: var(--red); }
-  button.secondary { background: var(--border); color: var(--text); }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 10px 8px; border-bottom: 1px solid var(--border); }
-  td { padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  td code { font-size: 0.78rem; background: var(--bg); padding: 3px 8px; border-radius: 4px; font-family: ui-monospace, monospace; }
-  .bar-wrap { background: var(--bg); border-radius: 4px; height: 8px; width: 100%; overflow: hidden; min-width: 80px; }
-  .bar { height: 100%; border-radius: 4px; transition: width 0.3s; }
-  .badge { padding: 3px 10px; border-radius: 9999px; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
-  .badge.active { background: rgba(16,185,129,0.15); color: var(--green); }
-  .badge.expired { background: rgba(245,158,11,0.15); color: var(--amber); }
-  .badge.revoked { background: rgba(239,68,68,0.15); color: var(--red); }
-  .badge.exceeded { background: rgba(245,158,11,0.15); color: var(--amber); }
-  .actions { display: flex; gap: 6px; }
-  .actions button { padding: 5px 12px; font-size: 0.75rem; }
-  .empty { color: var(--muted); text-align: center; padding: 24px; }
-  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--card); border: 1px solid var(--border); padding: 12px 20px; border-radius: 8px; font-size: 0.85rem; opacity: 0; transform: translateY(8px); transition: all 0.2s; pointer-events: none; z-index: 100; }
-  .toast.show { opacity: 1; transform: translateY(0); }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 32px 24px; max-width: 1200px; margin: 0 auto; line-height: 1.5; }
+  h1 { font-size: 1.1rem; margin-bottom: 8px; font-weight: 500; letter-spacing: -0.01em; }
+  h2 { font-size: 0.7rem; margin-bottom: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
+  .card { background: var(--card); border: 1px solid var(--border); padding: 24px; margin-bottom: 2px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border-top: 1px solid var(--border); border-left: 1px solid var(--border); margin-bottom: 24px; }
+  .stat { text-align: left; padding: 16px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .stat .value { font-size: 1.6rem; font-weight: 500; letter-spacing: -0.02em; }
+  .stat .label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 6px; font-weight: 500; }
+  form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
+  input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; font-size: 0.85rem; outline: none; transition: border-color 0.15s; border-radius: 0; }
+  input:focus { border-color: var(--text); }
+  button { border: 1px solid var(--border); padding: 10px 20px; font-size: 0.8rem; font-weight: 500; cursor: pointer; color: var(--text); background: var(--text); color: var(--bg); transition: all 0.15s; letter-spacing: 0.02em; border-radius: 0; }
+  button:hover { opacity: 0.75; }
+  button.danger { background: var(--bg); color: var(--text); }
+  button.secondary { background: var(--bg); color: var(--text); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 12px 8px; border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  td { padding: 14px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td code { font-size: 0.75rem; background: var(--bg); padding: 4px 8px; border: 1px solid var(--line); font-family: ui-monospace, monospace; letter-spacing: 0.02em; }
+  .bar-wrap { border-bottom: 1px solid var(--text); height: 16px; width: 100%; min-width: 80px; position: relative; }
+  .bar { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--text); transition: width 0.3s; }
+  .status { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  .status.active { text-decoration: underline; text-underline-offset: 3px; }
+  .status.expired, .status.exceeded { color: var(--muted); }
+  .status.revoked { text-decoration: line-through; color: var(--muted); }
+  .actions { display: flex; gap: 8px; }
+  .actions button { padding: 6px 14px; font-size: 0.72rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  .empty { color: var(--muted); text-align: center; padding: 32px; font-size: 0.85rem; letter-spacing: 0.02em; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px); background: var(--text); color: var(--bg); padding: 12px 24px; font-size: 0.82rem; opacity: 0; transition: all 0.2s; pointer-events: none; z-index: 100; font-weight: 500; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #login-form .field:first-child { flex: 1; min-width: 200px; }
-  .footer { text-align: center; color: var(--muted); font-size: 0.75rem; margin-top: 24px; }
+  .footer { text-align: center; color: var(--muted); font-size: 0.7rem; margin-top: 32px; letter-spacing: 0.04em; text-transform: uppercase; }
 </style>
 </head>
 <body>
