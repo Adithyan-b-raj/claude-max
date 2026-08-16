@@ -268,60 +268,60 @@ function dashboard(keys, adminSecret) {
 </html>`;
 }
 
-// --- Main Worker handler ---
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+// --- Pages Function handler ---
+// Pages Functions use `onRequest` with a context object, not Worker-style `fetch`.
+export const onRequest = async (context) => {
+  const { request, env } = context;
+  const url = new URL(request.url);
+  const path = url.pathname;
 
-    // CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
-    }
+  // CORS preflight
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
 
-    // ---- Proxy relay: /v1/messages ----
-    if (path === "/v1/messages" && request.method === "POST") {
-      return proxyRelay(request, env, ctx);
-    }
+  // ---- Proxy relay: /v1/messages ----
+  if (path === "/v1/messages" && request.method === "POST") {
+    return proxyRelay(request, env, context);
+  }
 
-    // ---- Admin routes (require Bearer admin secret) ----
-    if (path.startsWith("/admin")) {
-      return handleAdmin(request, env);
-    }
+  // ---- Admin routes (require Bearer admin secret) ----
+  if (path.startsWith("/admin")) {
+    return handleAdmin(request, env);
+  }
 
-    // ---- Health check ----
-    if (path === "/health") {
-      return json({ status: "ok", timestamp: new Date().toISOString() });
-    }
+  // ---- Health check ----
+  if (path === "/health") {
+    return json({ status: "ok", timestamp: new Date().toISOString() });
+  }
 
-    // ---- Everything else: serve static files ----
-    // On Pages, env.ASSETS is the static asset fetcher
-    if (env.ASSETS) {
-      return env.ASSETS.fetch(request);
-    }
+  // ---- Everything else: serve static files ----
+  // On Pages, env.ASSETS is the static asset fetcher
+  if (env.ASSETS) {
+    return env.ASSETS.fetch(request);
+  }
 
-    // Fallback: serve the dashboard
-    if (path === "/" || path === "/index.html") {
-      const adminSecret = await env.SHARE_KV.get("adminSecret");
-      if (!adminSecret) {
-        // Redirect to init
-        return new Response(dashboard([], ""), {
-          headers: { "content-type": "text/html" },
-        });
-      }
-      const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-      const keys = [];
-      for (const k of index) {
-        const data = await getShare(env, k);
-        if (data) keys.push({ ...data, shareKey: k, id: k });
-      }
-      return new Response(dashboard(keys, adminSecret), {
+  // Fallback: serve the dashboard
+  if (path === "/" || path === "/index.html") {
+    const adminSecret = await env.SHARE_KV.get("adminSecret");
+    if (!adminSecret) {
+      // First-time setup screen
+      return new Response(dashboard([], ""), {
         headers: { "content-type": "text/html" },
       });
     }
+    const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+    const keys = [];
+    for (const k of index) {
+      const data = await getShare(env, k);
+      if (data) keys.push({ ...data, shareKey: k, id: k });
+    }
+    return new Response(dashboard(keys, adminSecret), {
+      headers: { "content-type": "text/html" },
+    });
+  }
 
-    return json({ error: "not found" }, 404);
-  },
+  return json({ error: "not found" }, 404);
 };
 
 // ---- Proxy relay ----
