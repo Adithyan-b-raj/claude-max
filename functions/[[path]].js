@@ -554,6 +554,7 @@ async function handleAdmin(request, env) {
       name,
     };
 
+    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record));
     await addToIndex(env, shareKey);
 
     return json({
