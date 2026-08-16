@@ -1,4 +1,4 @@
-name = "opusmax-proxy"
+name = "claude-max"
 compatibility_date = "2025-01-01"
 
 pages_build_output_dir = "."
