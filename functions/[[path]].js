@@ -527,7 +527,7 @@ async function handleAdmin(request, env) {
       }
       const windowUsages = await Promise.all(keys.map(k => getWindowUsage(env, k.shareKey)));
       for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
-      return new Response(dashboard(keys, adminSecret, env), {
+      return new Response(await dashboard(keys, adminSecret, env), {
         headers: { "content-type": "text/html" },
       });
     }
