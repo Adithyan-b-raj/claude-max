@@ -493,43 +493,51 @@ async function proxyRelay(request, env, ctx) {
 
 // ---- Admin handler ----
 async function handleAdmin(request, env) {
-  const auth = request.headers.get("Authorization");
-  const adminSecret = await env.SHARE_KV.get("adminSecret");
-  const path = new URL(request.url).pathname;
+  try {
+    const auth = request.headers.get("Authorization");
+    const adminSecret = await env.SHARE_KV.get("adminSecret");
+    const path = new URL(request.url).pathname;
 
-  // Bootstrap: first time setup (no auth required)
-  if (!adminSecret) {
-    if (request.method === "POST" && path === "/admin/init") {
-      const body = await request.json().catch(() => ({}));
-      if (!body.adminSecret) return json({ error: "adminSecret required" }, 400);
-      await env.SHARE_KV.put("adminSecret", body.adminSecret);
-      return json({ ok: true });
+    // Bootstrap: first time setup (no auth required)
+    if (!adminSecret) {
+      if (request.method === "POST" && path === "/admin/init") {
+        const body = await request.json().catch(() => ({}));
+        if (!body.adminSecret) return json({ error: "adminSecret required" }, 400);
+        await env.SHARE_KV.put("adminSecret", body.adminSecret);
+        return json({ ok: true });
+      }
+      return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
     }
-    return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
-  }
 
-  // GET /admin — always serve the dashboard HTML (it has its own login form)
-  if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
-    const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-    const [shares, windowUsages] = await Promise.all([
-      Promise.all(index.map(k => getShare(env, k).then(d => d ? { ...d, shareKey: k, id: k } : null))),
-      Promise.all(index.map(k => getWindowUsage(env, k))),
-    ]);
-    const keys = shares.filter(Boolean);
-    for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
-    return new Response(dashboard(keys, adminSecret, env), {
-      headers: { "content-type": "text/html" },
-    });
-  }
+    // GET /admin — always serve the dashboard HTML (it has its own login form)
+    if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
+      const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+      const rawShares = await Promise.all(index.map(k => getShare(env, k)));
+      const keys = [];
+      for (let i = 0; i < index.length; i++) {
+        if (!rawShares[i]) continue;
+        keys.push({ ...rawShares[i], shareKey: index[i], id: index[i] });
+      }
+      const windowUsages = await Promise.all(keys.map(k => getWindowUsage(env, k.shareKey)));
+      for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
+      return new Response(dashboard(keys, adminSecret, env), {
+        headers: { "content-type": "text/html" },
+      });
+    }
 
-  // All other admin API endpoints require Bearer auth
-  if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
+    // All other admin API endpoints require Bearer auth
+    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
 
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
     const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-    const shares = await Promise.all(index.map(k => getShare(env, k).then(d => d ? { ...d, shareKey: k, id: k } : null)));
-    return json({ keys: shares.filter(Boolean) });
+    const rawShares = await Promise.all(index.map(k => getShare(env, k)));
+    const keys = [];
+    for (let i = 0; i < index.length; i++) {
+      if (!rawShares[i]) continue;
+      keys.push({ ...rawShares[i], shareKey: index[i], id: index[i] });
+    }
+    return json({ keys });
   }
 
   // Create key
@@ -596,4 +604,8 @@ async function handleAdmin(request, env) {
   }
 
   return json({ error: "not found" }, 404);
+  } catch (err) {
+    console.error("Admin handler error:", err);
+    return json({ error: "internal_error", message: err.message }, 500);
+  }
 }
