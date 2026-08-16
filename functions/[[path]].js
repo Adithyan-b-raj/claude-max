@@ -511,11 +511,12 @@ async function handleAdmin(request, env) {
   // GET /admin — always serve the dashboard HTML (it has its own login form)
   if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
     const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-    const keys = [];
-    for (const k of index) {
-      const data = await getShare(env, k);
-      if (data) keys.push({ ...data, shareKey: k, id: k });
-    }
+    const [shares, windowUsages] = await Promise.all([
+      Promise.all(index.map(k => getShare(env, k).then(d => d ? { ...d, shareKey: k, id: k } : null))),
+      Promise.all(index.map(k => getWindowUsage(env, k))),
+    ]);
+    const keys = shares.filter(Boolean);
+    for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
     return new Response(dashboard(keys, adminSecret, env), {
       headers: { "content-type": "text/html" },
     });
@@ -527,12 +528,8 @@ async function handleAdmin(request, env) {
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
     const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-    const keys = [];
-    for (const k of index) {
-      const data = await getShare(env, k);
-      if (data) keys.push({ ...data, shareKey: k, id: k });
-    }
-    return json({ keys });
+    const shares = await Promise.all(index.map(k => getShare(env, k).then(d => d ? { ...d, shareKey: k, id: k } : null)));
+    return json({ keys: shares.filter(Boolean) });
   }
 
   // Create key
