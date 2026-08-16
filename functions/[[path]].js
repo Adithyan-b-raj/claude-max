@@ -382,10 +382,11 @@ async function proxyRelay(request, env, ctx) {
 async function handleAdmin(request, env) {
   const auth = request.headers.get("Authorization");
   const adminSecret = await env.SHARE_KV.get("adminSecret");
+  const path = new URL(request.url).pathname;
 
-  // Bootstrap: first time setup
+  // Bootstrap: first time setup (no auth required)
   if (!adminSecret) {
-    if (request.method === "POST" && new URL(request.url).pathname === "/admin/init") {
+    if (request.method === "POST" && path === "/admin/init") {
       const body = await request.json().catch(() => ({}));
       if (!body.adminSecret) return json({ error: "adminSecret required" }, 400);
       await env.SHARE_KV.put("adminSecret", body.adminSecret);
@@ -394,12 +395,8 @@ async function handleAdmin(request, env) {
     return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
   }
 
-  if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
-
-  const path = new URL(request.url).pathname;
-
-  // Dashboard
-  if (request.method === "GET" && path === "/admin") {
+  // GET /admin — always serve the dashboard HTML (it has its own login form)
+  if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
     const index = (await env.SHARE_KV.get("share:index", "json")) || [];
     const keys = [];
     for (const k of index) {
@@ -410,6 +407,9 @@ async function handleAdmin(request, env) {
       headers: { "content-type": "text/html" },
     });
   }
+
+  // All other admin API endpoints require Bearer auth
+  if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
 
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
