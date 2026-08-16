@@ -285,6 +285,11 @@ export const onRequest = async (context) => {
     return proxyRelay(request, env, context);
   }
 
+  // ---- Model discovery: /v1/models ----
+  if (path === "/v1/models" && request.method === "GET") {
+    return proxyModels(request, env);
+  }
+
   // ---- Admin routes (require Bearer admin secret) ----
   if (path.startsWith("/admin")) {
     return handleAdmin(request, env);
@@ -323,6 +328,30 @@ export const onRequest = async (context) => {
 
   return json({ error: "not found" }, 404);
 };
+
+// ---- Model discovery ----
+async function proxyModels(request, env) {
+  // Validate share key for model listing
+  const shareKey = request.headers.get("x-share-key")
+    || new URL(request.url).searchParams.get("shareKey");
+  if (!shareKey) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
+
+  const record = await getShare(env, shareKey);
+  if (!record) return json({ error: "Invalid share key" }, 403);
+
+  const upstream = await fetch("https://api.opusmax.pro/v1/models", {
+    headers: {
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+  });
+
+  const data = await upstream.json();
+  return new Response(JSON.stringify(data), {
+    status: upstream.status,
+    headers: { "content-type": "application/json", ...corsHeaders },
+  });
+}
 
 // ---- Proxy relay ----
 async function proxyRelay(request, env, ctx) {
