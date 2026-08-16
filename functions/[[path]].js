@@ -26,10 +26,6 @@ async function getShare(env, key) {
   return env.SHARE_KV.get(`share:${key}`, "json");
 }
 
-async function setShare(env, key, data) {
-  await env.SHARE_KV.put(`share:${key}`, JSON.stringify(data));
-}
-
 async function deleteShare(env, key) {
   await env.SHARE_KV.delete(`share:${key}`);
   // Remove from index
@@ -47,13 +43,31 @@ async function addToIndex(env, key) {
 }
 
 async function updateUsage(env, shareKey, record, tokens) {
-  record.usedTokens += tokens;
-  await setShare(env, shareKey, record);
+  // Re-read latest state to handle concurrent requests (atomic read-modify-write)
+  const latest = await getShare(env, shareKey);
+  const baseRecord = latest || record;
+  const newTotal = baseRecord.usedTokens + tokens;
+
+  // Enforce cap at write-time — if another request already pushed it over, still block
+  if (newTotal > baseRecord.tokenLimit) {
+    await env.SHARE_KV.put(
+      `share:${shareKey}`,
+      JSON.stringify({ ...baseRecord, usedTokens: baseRecord.tokenLimit })
+    );
+    return;
+  }
+
+  const updated = { ...baseRecord, usedTokens: newTotal };
+
+  // Re-apply TTL so expired records auto-clean
+  const expiresAtMs = new Date(baseRecord.expiresAt).getTime();
+  const ttlSec = Math.max(60, Math.ceil((expiresAtMs - Date.now()) / 1000) + 86400);
+  await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(updated), { expirationTtl: ttlSec });
 
   // Daily breakdown
   const today = new Date().toISOString().split("T")[0];
   const daily = parseInt((await env.SHARE_KV.get(`usage:${shareKey}:${today}`)) || "0");
-  await env.SHARE_KV.put(`usage:${shareKey}:${today}`, String(daily + tokens));
+  await env.SHARE_KV.put(`usage:${shareKey}:${today}`, String(daily + tokens), { expirationTtl: 8 * 86400 });
 }
 
 function generateKey(length) {
@@ -478,13 +492,7 @@ async function handleAdmin(request, env) {
       name,
     };
 
-    await setShare(env, shareKey, record);
     await addToIndex(env, shareKey);
-
-    // Set KV TTL slightly longer than share expiry so the record auto-cleans
-    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record), {
-      expirationTtl: (days + 1) * 86400,
-    });
 
     return json({
       shareKey,
