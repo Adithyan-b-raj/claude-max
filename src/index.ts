@@ -37,7 +37,13 @@ export default {
     }
 
     // --- Proxy: check for share key in header or query param ---
-    const shareKey = request.headers.get('X-Share-Key') || url.searchParams.get('shareKey');
+    const shareKey = request.headers.get('X-Share-Key')
+                    || url.searchParams.get('shareKey')
+                    || (() => {
+                      const auth = request.headers.get('Authorization');
+                      if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
+                      return null;
+                    })();
 
     if (!shareKey) {
       return Response.json({ error: 'Missing X-Share-Key header or shareKey query parameter' }, { status: 401 });
