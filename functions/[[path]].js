@@ -208,7 +208,7 @@ function dashboard(keys, adminSecret) {
 
   <script>
     const SECRET = ${JSON.stringify(adminSecret)};
-    const API_BASE = location.pathname.replace(/\\/+$/, "");
+    const API_BASE = "";
 
     function toast(msg) {
       const el = document.getElementById("toast");
