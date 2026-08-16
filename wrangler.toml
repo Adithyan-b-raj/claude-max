@@ -1,0 +1,11 @@
+name = "opusmax-proxy"
+compatibility_date = "2025-01-01"
+
+pages_build_output_dir = "."
+
+[[kv_namespaces]]
+binding = "SHARE_KV"
+id = "bacb8165a5244db2b6b86c84dc548f9d"
+
+[vars]
+ENVIRONMENT = "production"
