@@ -119,6 +119,11 @@ async function dashboard(keys, adminSecret, env) {
   const activeCount = activeKeys.filter((k, i) => windowUsages[i] < k.tokenLimit).length;
   const renderedRows = await Promise.all(rows);
 
+  const windowReset = new Date(getCurrentWindowEnd()).toLocaleString("en-US", {
+    hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata",
+  });
+  const remainingMin = Math.max(0, Math.round((windowEnd - now) / 60000));
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -207,6 +212,11 @@ async function dashboard(keys, adminSecret, env) {
         <div class="stat"><div class="value">${activeCount}</div><div class="label">Active</div></div>
         <div class="stat"><div class="value">${formatTokens(totalUsed)}</div><div class="label">Tokens used (this window)</div></div>
         <div class="stat"><div class="value">${formatTokens(totalCap)}</div><div class="label">Total cap</div></div>
+      </div>
+      <div class="card" style="margin-bottom:24px;padding:12px 24px;display:flex;gap:24px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:500">Window</span>
+        <span style="font-size:0.85rem">5-hour rolling &middot; resets at <strong>${windowReset} IST</strong></span>
+        <span style="font-size:0.85rem;color:var(--muted)">&middot; ${remainingMin}m remaining</span>
       </div>
       <div style="overflow-x:auto">
         <table>
