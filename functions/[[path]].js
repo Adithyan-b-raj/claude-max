@@ -326,13 +326,20 @@ export const onRequest = async (context) => {
 
 // ---- Proxy relay ----
 async function proxyRelay(request, env, ctx) {
-  const auth = request.headers.get("x-share-key") || new URL(request.url).searchParams.get("shareKey");
-  if (!auth) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
+  const shareKey = request.headers.get("x-share-key")
+    || (() => {
+      const auth = request.headers.get("Authorization");
+      if (auth && auth.startsWith("Bearer ")) return auth.slice(7);
+      return null;
+    })()
+    || new URL(request.url).searchParams.get("shareKey");
 
-  const record = await getShare(env, auth);
+  if (!shareKey) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
+
+  const record = await getShare(env, shareKey);
   if (!record) return json({ error: "Invalid share key" }, 403);
   if (new Date(record.expiresAt) < new Date()) {
-    await deleteShare(env, auth);
+    await deleteShare(env, shareKey);
     return json({ error: "Share key expired" }, 403);
   }
   if (record.usedTokens >= record.tokenLimit) {
@@ -340,7 +347,7 @@ async function proxyRelay(request, env, ctx) {
   }
 
   const body = await request.text();
-  const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+  const upstream = await fetch("https://api.opusmax.pro/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -366,7 +373,7 @@ async function proxyRelay(request, env, ctx) {
 
   const total = inputTokens + outputTokens;
   if (total > 0) {
-    ctx.waitUntil(updateUsage(env, auth, record, total));
+    ctx.waitUntil(updateUsage(env, shareKey, record, total));
   }
 
   const headers = new Headers(upstream.headers);
