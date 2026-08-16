@@ -21,14 +21,22 @@ function formatTokens(n) {
   return String(n);
 }
 
+// --- Constants ---
+const WINDOW_SECONDS = 5 * 60 * 60; // 5-hour rolling window
+const WINDOW_MS = WINDOW_SECONDS * 1000;
+// OpusMax resets at 11:58 PM IST = 6:28 PM UTC
+const WINDOW_ANCHOR_UTC_MS = (18 + 28 / 60) * 60 * 60 * 1000; // 18:28 UTC in ms from midnight
+
 // --- KV helpers ---
+function getShareKey(key) { return `share:${key}`; }
+function getBucketKey(key, windowEnd) { return `bucket:${key}:${windowEnd}`; }
+
 async function getShare(env, key) {
-  return env.SHARE_KV.get(`share:${key}`, "json");
+  return env.SHARE_KV.get(getShareKey(key), "json");
 }
 
 async function deleteShare(env, key) {
-  await env.SHARE_KV.delete(`share:${key}`);
-  // Remove from index
+  await env.SHARE_KV.delete(getShareKey(key));
   const index = (await env.SHARE_KV.get("share:index", "json")) || [];
   const updated = index.filter((k) => k !== key);
   await env.SHARE_KV.put("share:index", JSON.stringify(updated));
@@ -37,37 +45,23 @@ async function deleteShare(env, key) {
 async function addToIndex(env, key) {
   const index = (await env.SHARE_KV.get("share:index", "json")) || [];
   if (!index.includes(key)) {
-    index.push(key);
-    await env.SHARE_KV.put("share:index", JSON.stringify(index));
+    await env.SHARE_KV.put("share:index", JSON.stringify([...index, key]));
   }
 }
 
-async function updateUsage(env, shareKey, record, tokens) {
-  // Re-read latest state to handle concurrent requests (atomic read-modify-write)
-  const latest = await getShare(env, shareKey);
-  const baseRecord = latest || record;
-  const newTotal = baseRecord.usedTokens + tokens;
+async function getWindowUsage(env, shareKey) {
+  const windowEnd = getCurrentWindowEnd();
+  const bucketKey = getBucketKey(shareKey, windowEnd);
+  const raw = await env.SHARE_KV.get(bucketKey);
+  return parseInt(raw || "0", 10);
+}
 
-  // Enforce cap at write-time — if another request already pushed it over, still block
-  if (newTotal > baseRecord.tokenLimit) {
-    await env.SHARE_KV.put(
-      `share:${shareKey}`,
-      JSON.stringify({ ...baseRecord, usedTokens: baseRecord.tokenLimit })
-    );
-    return;
-  }
-
-  const updated = { ...baseRecord, usedTokens: newTotal };
-
-  // Re-apply TTL so expired records auto-clean
-  const expiresAtMs = new Date(baseRecord.expiresAt).getTime();
-  const ttlSec = Math.max(60, Math.ceil((expiresAtMs - Date.now()) / 1000) + 86400);
-  await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(updated), { expirationTtl: ttlSec });
-
-  // Daily breakdown
-  const today = new Date().toISOString().split("T")[0];
-  const daily = parseInt((await env.SHARE_KV.get(`usage:${shareKey}:${today}`)) || "0");
-  await env.SHARE_KV.put(`usage:${shareKey}:${today}`, String(daily + tokens), { expirationTtl: 8 * 86400 });
+async function incrementWindowUsage(env, shareKey, tokens) {
+  const windowEnd = getCurrentWindowEnd();
+  const bucketKey = getBucketKey(shareKey, windowEnd);
+  const current = parseInt((await env.SHARE_KV.get(bucketKey)) || "0", 10);
+  const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
+  await env.SHARE_KV.put(bucketKey, String(current + tokens), { expirationTtl: ttlSec });
 }
 
 function generateKey(length) {
@@ -78,11 +72,14 @@ function generateKey(length) {
 }
 
 // --- Dashboard HTML ---
-function dashboard(keys, adminSecret) {
+async function dashboard(keys, adminSecret, env) {
   const now = Date.now();
+  const windowEnd = getCurrentWindowEnd();
+
   const rows = keys
-    .map((k) => {
-      const pct = k.tokenLimit > 0 ? Math.min(100, (k.usedTokens / k.tokenLimit) * 100) : 0;
+    .map(async (k) => {
+      const windowUsage = await getWindowUsage(env, k.shareKey);
+      const pct = k.tokenLimit > 0 ? Math.min(100, (windowUsage / k.tokenLimit) * 100) : 0;
       const status = k.revoked
         ? '<span class="status revoked">Revoked</span>'
         : now > new Date(k.expiresAt).getTime()
@@ -97,21 +94,23 @@ function dashboard(keys, adminSecret) {
       return `<tr>
         <td>${escapeHtml(k.name)}</td>
         <td><code>${escapeHtml(k.shareKey)}</code></td>
-        <td>${formatTokens(k.usedTokens)} / ${formatTokens(k.tokenLimit)}</td>
+        <td>${formatTokens(windowUsage)} / ${formatTokens(k.tokenLimit)}</td>
         <td><div class="bar-wrap"><div class="bar" style="width:${pct.toFixed(1)}%"></div></div></td>
         <td>${status}</td>
         <td>${ttl}</td>
         <td class="actions">
           <button onclick="copyKey('${escapeHtml(k.shareKey)}')">Copy</button>
-          <button onclick="revokeKey('${escapeHtml(k.id)}')" class="danger">Revoke</button>
+          <button onclick="revokeKey('${escapeHtml(k.shareKey)}')" class="danger">Revoke</button>
         </td>
       </tr>`;
-    })
-    .join("");
+    });
 
-  const active = keys.filter((k) => !k.revoked && now <= new Date(k.expiresAt).getTime() && k.usedTokens < k.tokenLimit).length;
-  const totalUsed = keys.reduce((a, k) => a + k.usedTokens, 0);
-  const totalCap = keys.reduce((a, k) => a + k.tokenLimit, 0);
+  const activeKeys = keys.filter((k) => !k.revoked && now <= new Date(k.expiresAt).getTime());
+  const windowUsages = await Promise.all(activeKeys.map((k) => getWindowUsage(env, k.shareKey)));
+  const totalUsed = windowUsages.reduce((a, u) => a + u, 0);
+  const totalCap = activeKeys.reduce((a, k) => a + k.tokenLimit, 0);
+  const activeCount = activeKeys.filter((k, i) => windowUsages[i] < k.tokenLimit).length;
+  const renderedRows = await Promise.all(rows);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -198,14 +197,14 @@ function dashboard(keys, adminSecret) {
       <h1>Shared keys</h1>
       <div class="grid">
         <div class="stat"><div class="value">${keys.length}</div><div class="label">Total keys</div></div>
-        <div class="stat"><div class="value">${active}</div><div class="label">Active</div></div>
-        <div class="stat"><div class="value">${formatTokens(totalUsed)}</div><div class="label">Tokens used</div></div>
+        <div class="stat"><div class="value">${activeCount}</div><div class="label">Active</div></div>
+        <div class="stat"><div class="value">${formatTokens(totalUsed)}</div><div class="label">Tokens used (this window)</div></div>
         <div class="stat"><div class="value">${formatTokens(totalCap)}</div><div class="label">Total cap</div></div>
       </div>
       <div style="overflow-x:auto">
         <table>
           <thead><tr><th>Label</th><th>Key</th><th>Usage</th><th>Quota</th><th>Status</th><th>TTL</th><th></th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="7" class="empty">No keys yet</td></tr>`}</tbody>
+          <tbody>${renderedRows.length ? renderedRows.join("") : `<tr><td colspan="7" class="empty">No keys yet</td></tr>`}</tbody>
         </table>
       </div>
       <div style="margin-top:16px">
@@ -263,9 +262,8 @@ function dashboard(keys, adminSecret) {
       toast("Copied: " + key);
     }
 
-    async function revokeKey(id) {
-      if (!confirm("Revoke this key? The user will lose access immediately.")) return;
-      const r = await api("POST", "/admin/revoke", { shareKey: id });
+    async function revokeKey(key) {
+      const r = await api("POST", "/admin/revoke", { shareKey: key });
       if (r.ok) { toast("Key revoked"); location.reload(); }
       else toast("Failed to revoke");
     }
@@ -323,7 +321,7 @@ export const onRequest = async (context) => {
     const adminSecret = await env.SHARE_KV.get("adminSecret");
     if (!adminSecret) {
       // First-time setup screen
-      return new Response(dashboard([], ""), {
+      return new Response(dashboard([], "", env), {
         headers: { "content-type": "text/html" },
       });
     }
@@ -333,7 +331,7 @@ export const onRequest = async (context) => {
       const data = await getShare(env, k);
       if (data) keys.push({ ...data, shareKey: k, id: k });
     }
-    return new Response(dashboard(keys, adminSecret), {
+    return new Response(dashboard(keys, adminSecret, env), {
       headers: { "content-type": "text/html" },
     });
   }
@@ -384,8 +382,10 @@ async function proxyRelay(request, env, ctx) {
     await deleteShare(env, shareKey);
     return json({ error: "Share key expired" }, 403);
   }
-  if (record.usedTokens >= record.tokenLimit) {
-    return json({ error: "Token limit reached", used: record.usedTokens, limit: record.tokenLimit }, 429);
+
+  const windowUsage = await getWindowUsage(env, shareKey);
+  if (windowUsage >= record.tokenLimit) {
+    return json({ error: "Token limit reached for this window", used: windowUsage, limit: record.tokenLimit, reset: new Date(getCurrentWindowEnd()).toISOString() }, 429);
   }
 
   const body = await request.text();
@@ -446,7 +446,7 @@ async function proxyRelay(request, env, ctx) {
           buffer = keep;
         }
         const total = inputTokens + outputTokens;
-        if (total > 0) ctx.waitUntil(updateUsage(env, shareKey, record, total));
+        if (total > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
       } catch (e) {
         // Stream interrupted — best-effort count what we have
       } finally {
@@ -456,8 +456,8 @@ async function proxyRelay(request, env, ctx) {
 
     const headers = new Headers(upstream.headers);
     headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - record.usedTokens)));
-    headers.set("X-RateLimit-Reset", record.expiresAt);
+    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage)));
+    headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
 
     return new Response(readable, { status: upstream.status, headers });
   }
@@ -479,14 +479,14 @@ async function proxyRelay(request, env, ctx) {
 
   const total = inputTokens + outputTokens;
   if (total > 0) {
-    ctx.waitUntil(updateUsage(env, shareKey, record, total));
+    ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
   }
 
   const headers = new Headers(upstream.headers);
-  const remaining = Math.max(0, record.tokenLimit - record.usedTokens - total);
+  const windowAfterThis = windowUsage + total;
   headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-  headers.set("X-RateLimit-Remaining", String(remaining));
-  headers.set("X-RateLimit-Reset", record.expiresAt);
+  headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowAfterThis)));
+  headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
 
   return new Response(respBody, { status: upstream.status, headers });
 }
@@ -516,7 +516,7 @@ async function handleAdmin(request, env) {
       const data = await getShare(env, k);
       if (data) keys.push({ ...data, shareKey: k, id: k });
     }
-    return new Response(dashboard(keys, adminSecret), {
+    return new Response(dashboard(keys, adminSecret, env), {
       headers: { "content-type": "text/html" },
     });
   }
