@@ -1,13 +1,16 @@
-import Anthropic from 'npm:@anthropic-ai/sdk@0.67.0';
+// --- Constants ---
+const WINDOW_SECONDS = 5 * 60 * 60; // 5-hour rolling window
+const WINDOW_MS = WINDOW_SECONDS * 1000;
+// OpusMax resets at 11:58 PM IST = 6:28 PM UTC
+const WINDOW_ANCHOR_UTC_MS = (18 + 28 / 60) * 60 * 60 * 1000; // 18:28 UTC in ms from midnight
 
 // --- KV Keys ---
-// share:{shareKey}  → JSON: { expiresAt (ISO), tokenLimit, usedTokens, createdAt, name }
-// usage:{shareKey}:{date} → counter (daily token usage breakdown)
+// share:{shareKey}  → JSON: { expiresAt (ISO), tokenLimit, createdAt, name }
+// bucket:{shareKey}:{bucketStart} → token count for that 5-hour window
 
 interface ShareRecord {
   expiresAt: string;
   tokenLimit: number;
-  usedTokens: number;
   createdAt: string;
   name: string;
 }
@@ -62,13 +65,15 @@ export default {
       return Response.json({ error: 'This share key has expired' }, { status: 403 });
     }
 
-    // Check token limit
-    if (shareData.usedTokens >= shareData.tokenLimit) {
+    // Check token limit (5-hour rolling window)
+    const windowTokens = await getWindowUsage(env, shareKey);
+    if (windowTokens >= shareData.tokenLimit) {
+      const windowEnd = getCurrentWindowEnd();
       return Response.json({
-        error: 'Token limit reached',
+        error: 'Rate limit reached',
         limit: shareData.tokenLimit,
-        used: shareData.usedTokens,
-        resetAt: shareData.expiresAt
+        used: windowTokens,
+        resetAt: new Date(windowEnd).toISOString(),
       }, { status: 429 });
     }
 
@@ -107,17 +112,18 @@ export default {
 
       const totalTokens = inputTokens + outputTokens;
 
-      // Update usage in KV (fire-and-forget with ctx.waitUntil)
+      // Update usage in current 5-hour window (fire-and-forget with ctx.waitUntil)
       if (totalTokens > 0) {
-        ctx.waitUntil(updateUsage(env, shareKey, shareData, totalTokens));
+        ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
       }
 
       // Return response with custom headers showing remaining quota
       const newHeaders = new Headers(response.headers);
-      const remaining = shareData.tokenLimit - shareData.usedTokens - totalTokens;
+      const currentWindow = await getWindowUsage(env, shareKey);
+      const remaining = shareData.tokenLimit - currentWindow;
       newHeaders.set('X-RateLimit-Limit', String(shareData.tokenLimit));
       newHeaders.set('X-RateLimit-Remaining', String(Math.max(0, remaining)));
-      newHeaders.set('X-RateLimit-Reset', shareData.expiresAt);
+      newHeaders.set('X-RateLimit-Reset', new Date(getCurrentWindowEnd()).toISOString());
 
       return new Response(responseBody, {
         status: response.status,
@@ -149,8 +155,8 @@ async function handleCreateShare(request: Request, env: Env): Promise<Response> 
   if (days < 1 || days > 30) {
     return Response.json({ error: 'Days must be between 1 and 30' }, { status: 400 });
   }
-  if (tokenLimit < 1000 || tokenLimit > 10_000_000) {
-    return Response.json({ error: 'Token limit must be between 1,000 and 10,000,000' }, { status: 400 });
+  if (tokenLimit < 1000 || tokenLimit > 20_000_000) {
+    return Response.json({ error: 'Token limit must be between 1,000 and 20,000,000 (per 5-hour window)' }, { status: 400 });
   }
 
   // Generate a random share key
@@ -162,7 +168,6 @@ async function handleCreateShare(request: Request, env: Env): Promise<Response> 
   const record: ShareRecord = {
     expiresAt: expiresAt.toISOString(),
     tokenLimit,
-    usedTokens: 0,
     createdAt: now.toISOString(),
     name,
   };
@@ -240,36 +245,66 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
     return Response.json({ error: 'Share key not found' }, { status: 404 });
   }
 
-  // Get daily usage breakdown (last 7 days)
-  const dailyUsage: Record<string, number> = {};
-  for (let i = 0; i < 7; i++) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    const dateStr = date.toISOString().split('T')[0];
-    const count = await env.SHARE_KV.get(`usage:${shareKey}:${dateStr}`);
-    if (count) dailyUsage[dateStr] = parseInt(count);
+  // Get window-based usage breakdown (current + last 6 windows)
+  const windowUsage: Record<string, { tokens: number; resetAt: string }> = {};
+  for (let i = 0; i < 6; i++) {
+    const windowEnd = getCurrentWindowEnd() - (i * WINDOW_MS);
+    const bucketKey = `bucket:${shareKey}:${windowEnd}`;
+    const count = await env.SHARE_KV.get(bucketKey);
+    const dateKey = new Date(windowEnd).toISOString();
+    windowUsage[dateKey] = {
+      tokens: count ? parseInt(count) : 0,
+      resetAt: new Date(windowEnd - WINDOW_MS).toISOString(),
+    };
   }
+
+  // Get current window usage
+  const currentWindowTokens = await getWindowUsage(env, shareKey);
 
   return Response.json({
     shareKey,
-    ...(data as ShareRecord),
-    dailyUsage,
-    percentUsed: Math.round(((data as ShareRecord).usedTokens / (data as ShareRecord).tokenLimit) * 100),
+    expiresAt: data.expiresAt,
+    tokenLimit: data.tokenLimit,
+    createdAt: data.createdAt,
+    name: data.name,
+    windowUsage,
+    currentWindowUsed: currentWindowTokens,
+    percentUsed: Math.round((currentWindowTokens / data.tokenLimit) * 100),
   });
 }
 
-// --- Helpers ---
+// --- Rolling Window Helpers (5-hour windows, matching OpusMax) ---
 
-async function updateUsage(env: Env, shareKey: string, shareData: ShareRecord, tokens: number): Promise<void> {
-  const newTotal = shareData.usedTokens + tokens;
-  const updated: ShareRecord = { ...shareData, usedTokens: newTotal };
-  await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(updated));
-
-  // Track daily usage
-  const today = new Date().toISOString().split('T')[0];
-  const currentDaily = parseInt((await env.SHARE_KV.get(`usage:${shareKey}:${today}`)) || '0');
-  await env.SHARE_KV.put(`usage:${shareKey}:${today}`, String(currentDaily + tokens));
+function getCurrentWindowEnd(): number {
+  // OpusMax resets at 11:58 PM IST = 6:28 PM UTC, then every 5 hours after.
+  // Windows: 13:28→18:28, 18:28→23:28, 23:28→04:28, 04:28→09:28, etc. (UTC)
+  const now = Date.now();
+  const today = new Date(now);
+  today.setUTCHours(0, 0, 0, 0);
+  const anchor = today.getTime() + WINDOW_ANCHOR_UTC_MS;
+  const elapsed = now - anchor;
+  const windowEnd = anchor + Math.ceil(elapsed / WINDOW_MS) * WINDOW_MS;
+  return windowEnd;
 }
+
+async function getWindowUsage(env: Env, shareKey: string): Promise<number> {
+  const windowEnd = getCurrentWindowEnd();
+  const bucketKey = `bucket:${shareKey}:${windowEnd}`;
+  const raw = await env.SHARE_KV.get(bucketKey);
+  return parseInt(raw || '0', 10);
+}
+
+async function incrementWindowUsage(env: Env, shareKey: string, tokens: number): Promise<void> {
+  const windowEnd = getCurrentWindowEnd();
+  const bucketKey = `bucket:${shareKey}:${windowEnd}`;
+  const current = parseInt((await env.SHARE_KV.get(bucketKey)) || '0', 10);
+  const newTotal = current + tokens;
+  // KV TTL: keep the bucket for 6 hours (1h past window end)
+  const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
+  await env.SHARE_KV.put(bucketKey, String(newTotal), { expirationTtl: ttlSec });
+}
+
+// --- Helpers ---
 
 function generateKey(length: number): string {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
