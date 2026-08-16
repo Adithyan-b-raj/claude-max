@@ -570,6 +570,26 @@ async function handleAdmin(request, env) {
       });
     }
 
+    // GET /admin/view?secret=... — browser-friendly shortcut
+    if (request.method === "GET" && path === "/admin/view") {
+      const providedSecret = url.searchParams.get("secret") || "";
+      if (providedSecret !== adminSecret) {
+        return new Response("Unauthorized — close this tab.", { status: 401 });
+      }
+      const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+      const rawShares = await Promise.all(index.map(k => getShare(env, k)));
+      const keys = [];
+      for (let i = 0; i < index.length; i++) {
+        if (!rawShares[i]) continue;
+        keys.push({ ...rawShares[i], shareKey: index[i], id: index[i] });
+      }
+      const windowUsages = await Promise.all(keys.map(k => getWindowUsage(env, k.shareKey)));
+      for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
+      return new Response(await dashboard(keys, adminSecret, env), {
+        headers: { "content-type": "text/html" },
+      });
+    }
+
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
     const index = (await env.SHARE_KV.get("share:index", "json")) || [];
