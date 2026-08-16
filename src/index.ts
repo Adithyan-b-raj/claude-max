@@ -76,7 +76,7 @@ export default {
         method: request.method,
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${env.ANTHROPIC_API_KEY}`,
+          'x-api-key': env.ANTHROPIC_API_KEY,
           'anthropic-version': '2023-06-01',
         },
         body: request.method !== 'GET' && request.method !== 'HEAD' ? body : undefined,
