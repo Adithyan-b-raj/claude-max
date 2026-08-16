@@ -333,6 +333,7 @@ export const onRequest = async (context) => {
 async function proxyModels(request, env) {
   // Validate share key for model listing
   const shareKey = request.headers.get("x-share-key")
+    || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim()
     || new URL(request.url).searchParams.get("shareKey");
   if (!shareKey) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
 
