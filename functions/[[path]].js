@@ -15,6 +15,16 @@ function escapeHtml(str) {
   return str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+function countTokens(usage) {
+  if (!usage || typeof usage !== "object") return 0;
+  return (
+    (usage.input_tokens || 0) +
+    (usage.output_tokens || 0) +
+    (usage.cache_creation_input_tokens || 0) +
+    (usage.cache_read_input_tokens || 0)
+  );
+}
+
 function formatTokens(n) {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
@@ -439,6 +449,8 @@ async function proxyRelay(request, env, ctx) {
     const reader = upstream.body.getReader();
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     let buffer = "";
 
     (async () => {
@@ -459,6 +471,8 @@ async function proxyRelay(request, env, ctx) {
                 if (evt.type === "message_start" && evt.message?.usage) {
                   inputTokens = evt.message.usage.input_tokens || 0;
                   outputTokens = evt.message.usage.output_tokens || 0;
+                  cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
+                  cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
                 } else if (evt.type === "message_delta" && evt.usage) {
                   outputTokens = evt.usage.output_tokens || outputTokens;
                 }
@@ -469,7 +483,7 @@ async function proxyRelay(request, env, ctx) {
           const keep = lines.slice(-2).join("\n");
           buffer = keep;
         }
-        const total = inputTokens + outputTokens;
+        const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
         if (total > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
       } catch (e) {
         // Stream interrupted — best-effort count what we have
@@ -489,19 +503,23 @@ async function proxyRelay(request, env, ctx) {
   // --- Non-streaming: buffer and extract usage from JSON ---
   const respBody = await upstream.text();
   let inputTokens = 0,
-    outputTokens = 0;
+    outputTokens = 0,
+    cacheReadTokens = 0,
+    cacheCreationTokens = 0;
 
   try {
     const parsed = JSON.parse(respBody);
     if (parsed.usage) {
       inputTokens = parsed.usage.input_tokens || 0;
       outputTokens = parsed.usage.output_tokens || 0;
+      cacheReadTokens = parsed.usage.cache_read_input_tokens || 0;
+      cacheCreationTokens = parsed.usage.cache_creation_input_tokens || 0;
     }
   } catch {
     // Non-JSON / unexpected format
   }
 
-  const total = inputTokens + outputTokens;
+  const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
   if (total > 0) {
     ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
   }
@@ -533,7 +551,10 @@ async function handleAdmin(request, env) {
       return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
     }
 
-    // GET /admin — always serve the dashboard HTML (it has its own login form)
+    // All admin routes require Bearer auth (dashboard and API alike)
+    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
+
+    // GET /admin — serve the dashboard HTML
     if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
       const index = (await env.SHARE_KV.get("share:index", "json")) || [];
       const rawShares = await Promise.all(index.map(k => getShare(env, k)));
@@ -548,9 +569,6 @@ async function handleAdmin(request, env) {
         headers: { "content-type": "text/html" },
       });
     }
-
-    // All other admin API endpoints require Bearer auth
-    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
 
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
