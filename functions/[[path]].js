@@ -551,11 +551,35 @@ async function handleAdmin(request, env) {
       return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
     }
 
-    // All admin routes require Bearer auth (dashboard and API alike)
-    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
+    // GET /admin/view — serve a login form (avoids URL-encoding issues with special chars)
+    if (request.method === "GET" && path === "/admin/view") {
+      return new Response(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>OpusMax Admin</title>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; background: #fff; color: #000; padding: 60px 24px; max-width: 420px; margin: 0 auto; }
+  h1 { font-size: 1.1rem; font-weight: 500; margin-bottom: 8px; }
+  p { color: #666; font-size: 0.85rem; margin-bottom: 16px; }
+  input { border: 1px solid #000; padding: 10px 12px; font-size: 0.85rem; width: 100%; outline: none; }
+  button { border: 1px solid #000; background: #000; color: #fff; padding: 10px 20px; font-size: 0.8rem; cursor: pointer; margin-top: 12px; }
+</style></head>
+<body>
+  <h1>OpusMax Admin</h1>
+  <p>Enter your admin secret to continue.</p>
+  <form method="POST" action="/admin/view">
+    <input type="password" name="secret" placeholder="Admin secret" autofocus />
+    <button type="submit">Login</button>
+  </form>
+</body></html>`, { headers: { "content-type": "text/html" } });
+    }
 
-    // GET /admin — serve the dashboard HTML
-    if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
+    // POST /admin/view — validate secret and show dashboard
+    if (request.method === "POST" && path === "/admin/view") {
+      const form = await request.formData().catch(() => null);
+      const secret = form ? form.get("secret") : "";
+      if (!secret || secret !== adminSecret) {
+        return new Response("Unauthorized — close this tab.", { status: 401 });
+      }
       const index = (await env.SHARE_KV.get("share:index", "json")) || [];
       const rawShares = await Promise.all(index.map(k => getShare(env, k)));
       const keys = [];
@@ -570,12 +594,11 @@ async function handleAdmin(request, env) {
       });
     }
 
-    // GET /admin/view?secret=... — browser-friendly shortcut
-    if (request.method === "GET" && path === "/admin/view") {
-      const providedSecret = url.searchParams.get("secret") || "";
-      if (providedSecret !== adminSecret) {
-        return new Response("Unauthorized — close this tab.", { status: 401 });
-      }
+    // All admin routes require Bearer auth
+    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
+
+    // GET /admin — serve the dashboard HTML
+    if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
       const index = (await env.SHARE_KV.get("share:index", "json")) || [];
       const rawShares = await Promise.all(index.map(k => getShare(env, k)));
       const keys = [];
