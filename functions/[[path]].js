@@ -55,6 +55,23 @@ function getCurrentWindowEnd() {
 function getShareKey(key) { return `share:${key}`; }
 function getBucketKey(key, windowEnd) { return `bucket:${key}:${windowEnd}`; }
 
+const ADMIN_LOGIN_LIMIT = 5;
+const ADMIN_LOGIN_WINDOW_SEC = 60; // counter TTL while in window
+const ADMIN_LOGIN_LOCKOUT_SEC = 900; // lockout after too many failures
+
+async function checkLoginRateLimit(env, ip) {
+  const key = `loginfail:${ip}`;
+  const raw = await env.SHARE_KV.get(key);
+  const count = raw ? parseInt(raw, 10) : 0;
+  if (count >= ADMIN_LOGIN_LIMIT) return false;
+  await env.SHARE_KV.put(key, String(count + 1), { expirationTtl: ADMIN_LOGIN_WINDOW_SEC });
+  return true;
+}
+
+async function recordLoginSuccess(env, ip) {
+  await env.SHARE_KV.delete(`loginfail:${ip}`);
+}
+
 async function getShare(env, key) {
   return env.SHARE_KV.get(getShareKey(key), "json");
 }
@@ -84,15 +101,26 @@ async function incrementWindowUsage(env, shareKey, tokens) {
   const windowEnd = getCurrentWindowEnd();
   const bucketKey = getBucketKey(shareKey, windowEnd);
   const current = parseInt((await env.SHARE_KV.get(bucketKey)) || "0", 10);
+  const newTotal = current + tokens;
+  // Re-read to handle concurrent writes — use max to never undercount
+  const latest = parseInt((await env.SHARE_KV.get(bucketKey)) || "0", 10);
+  const finalTotal = Math.max(newTotal, latest + tokens);
   const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
-  await env.SHARE_KV.put(bucketKey, String(current + tokens), { expirationTtl: ttlSec });
+  await env.SHARE_KV.put(bucketKey, String(finalTotal), { expirationTtl: ttlSec });
 }
 
 function generateKey(length) {
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const arr = new Uint8Array(length);
-  crypto.getRandomValues(arr);
-  return Array.from(arr, (b) => chars[b % chars.length]).join("");
+  const max = 256 - (256 % chars.length); // rejection sampling threshold
+  const result = [];
+  while (result.length < length) {
+    const arr = new Uint8Array(1);
+    crypto.getRandomValues(arr);
+    if (arr[0] < max) {
+      result.push(chars[arr[0] % chars.length]);
+    }
+  }
+  return result.join("");
 }
 
 // --- Dashboard HTML ---
@@ -462,26 +490,28 @@ async function proxyRelay(request, env, ctx) {
           buffer += chunk;
           await writer.write(encoder.encode(chunk));
 
-          // Look for usage in last line of buffer
-          const lines = buffer.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ") && line.includes("\"usage\"")) {
-              try {
-                const evt = JSON.parse(line.slice(6));
-                if (evt.type === "message_start" && evt.message?.usage) {
-                  inputTokens = evt.message.usage.input_tokens || 0;
-                  outputTokens = evt.message.usage.output_tokens || 0;
-                  cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
-                  cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
-                } else if (evt.type === "message_delta" && evt.usage) {
-                  outputTokens = evt.usage.output_tokens || outputTokens;
-                }
-              } catch {}
+          // Extract complete SSE events (delimited by \n\n) and parse usage
+          let eventEnd;
+          while ((eventEnd = buffer.indexOf("\n\n")) !== -1) {
+            const eventText = buffer.slice(0, eventEnd);
+            buffer = buffer.slice(eventEnd + 2);
+            for (const line of eventText.split("\n")) {
+              if (line.startsWith("data: ") && line.includes("\"usage\"")) {
+                try {
+                  const evt = JSON.parse(line.slice(6));
+                  if (evt.type === "message_start" && evt.message?.usage) {
+                    inputTokens = evt.message.usage.input_tokens || 0;
+                    outputTokens = evt.message.usage.output_tokens || 0;
+                    cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
+                    cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
+                  } else if (evt.type === "message_delta" && evt.usage) {
+                    outputTokens += evt.usage.output_tokens || 0;
+                  }
+                } catch {}
+              }
             }
           }
-          // Keep last 2 lines for cross-chunk parsing
-          const keep = lines.slice(-2).join("\n");
-          buffer = keep;
+          // buffer now holds only the incomplete trailing event
         }
         const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
         if (total > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
@@ -494,7 +524,7 @@ async function proxyRelay(request, env, ctx) {
 
     const headers = new Headers(upstream.headers);
     headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage)));
+    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage - 1)));
     headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
 
     return new Response(readable, { status: upstream.status, headers });
@@ -524,7 +554,11 @@ async function proxyRelay(request, env, ctx) {
     ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
   }
 
-  const headers = new Headers(upstream.headers);
+  const headers = new Headers();
+  const allowed = new Set(["content-type", "date", "cache-control", "retry-after", "x-request-id"]);
+  for (const [key, val] of upstream.headers) {
+    if (allowed.has(key.toLowerCase())) headers.set(key, val);
+  }
   const windowAfterThis = windowUsage + total;
   headers.set("X-RateLimit-Limit", String(record.tokenLimit));
   headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowAfterThis)));
@@ -575,11 +609,16 @@ async function handleAdmin(request, env) {
 
     // POST /admin/view — validate secret and show dashboard
     if (request.method === "POST" && path === "/admin/view") {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      if (!(await checkLoginRateLimit(env, ip))) {
+        return json({ error: "Too many failed login attempts. Try again later." }, 429);
+      }
       const form = await request.formData().catch(() => null);
       const secret = form ? form.get("secret") : "";
       if (!secret || secret !== adminSecret) {
-        return new Response("Unauthorized — close this tab.", { status: 401 });
+        return json({ error: "unauthorized" }, 401);
       }
+      await recordLoginSuccess(env, ip);
       const index = (await env.SHARE_KV.get("share:index", "json")) || [];
       const rawShares = await Promise.all(index.map(k => getShare(env, k)));
       const keys = [];
@@ -639,12 +678,13 @@ async function handleAdmin(request, env) {
     const record = {
       expiresAt: expiresAt.toISOString(),
       tokenLimit,
-      usedTokens: 0,
       createdAt: now.toISOString(),
       name,
     };
 
-    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record));
+    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record), {
+      expirationTtl: Math.ceil((days + 1) * 86400),
+    });
     await addToIndex(env, shareKey);
 
     return json({
@@ -671,20 +711,27 @@ async function handleAdmin(request, env) {
     const data = await getShare(env, key);
     if (!data) return json({ error: "Key not found" }, 404);
 
-    const daily = {};
-    for (let i = 0; i < 7; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const ds = d.toISOString().split("T")[0];
-      const v = await env.SHARE_KV.get(`usage:${key}:${ds}`);
-      if (v) daily[ds] = parseInt(v);
+    const currentWindowUsed = await getWindowUsage(env, key);
+    const windowUsage = {};
+    for (let i = 0; i < 6; i++) {
+      const windowEnd = getCurrentWindowEnd() - (i + 1) * WINDOW_MS;
+      const bucketKey = getBucketKey(key, windowEnd);
+      const v = await env.SHARE_KV.get(bucketKey);
+      if (v) {
+        const dateKey = new Date(windowEnd).toISOString().split("T")[0];
+        windowUsage[dateKey] = parseInt(v, 10);
+      }
     }
 
     return json({
       shareKey: key,
-      ...data,
-      dailyUsage: daily,
-      percentUsed: Math.round((data.usedTokens / data.tokenLimit) * 100),
+      expiresAt: data.expiresAt,
+      tokenLimit: data.tokenLimit,
+      createdAt: data.createdAt,
+      name: data.name,
+      currentWindowUsed,
+      windowUsage,
+      percentUsed: Math.round((currentWindowUsed / data.tokenLimit) * 100),
     });
   }
 
