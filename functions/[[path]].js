@@ -143,6 +143,32 @@ async function dashboard(keys, adminSecret, env) {
         now > new Date(k.expiresAt).getTime()
           ? "expired"
           : `${Math.max(0, Math.round((new Date(k.expiresAt).getTime() - now) / 3600000))}h left`;
+
+      // Load per-request details for this key
+      const winEnd = getCurrentWindowEnd();
+      const detailRaw = await env.SHARE_KV.get(`detail:${k.shareKey}:${winEnd}`);
+      const details = detailRaw ? JSON.parse(detailRaw) : [];
+      const detailRows = details.slice().reverse().slice(0, 20).map(d => {
+        const time = new Date(d.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        return `<tr class="detail-row">
+          <td>${time}</td>
+          <td class="num">${formatTokens(d.input)}</td>
+          <td class="num">${formatTokens(d.output)}</td>
+          <td class="num cache-read">${formatTokens(d.cacheRead)}</td>
+          <td class="num cache-creation">${formatTokens(d.cacheCreation)}</td>
+          <td class="num total"><strong>${formatTokens(d.total)}</strong></td>
+        </tr>`;
+      }).join('');
+
+      const detailHtml = details.length > 0 ? `
+        <div class="detail-panel" id="detail-${escapeHtml(k.shareKey)}">
+          <table class="detail-table">
+            <thead><tr><th>Time</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th class="total-col">Total</th></tr></thead>
+            <tbody>${detailRows || '<tr><td colspan="6" style="color:#999;text-align:center">No requests yet</td></tr>'}</tbody>
+          </table>
+          ${details.length > 20 ? `<p class="detail-more">Showing last 20 of ${details.length} requests</p>` : ''}
+        </div>` : '';
+
       return `<tr>
         <td>${escapeHtml(k.name)}</td>
         <td><code>${escapeHtml(k.shareKey)}</code></td>
@@ -151,8 +177,14 @@ async function dashboard(keys, adminSecret, env) {
         <td>${status}</td>
         <td>${ttl}</td>
         <td class="actions">
+          <button onclick="toggleDetail('${escapeHtml(k.shareKey)}')">Details</button>
           <button onclick="copyKey('${escapeHtml(k.shareKey)}')">Copy</button>
           <button onclick="revokeKey('${escapeHtml(k.shareKey)}')" class="danger">Revoke</button>
+        </td>
+      </tr>
+      <tr class="detail-toggle" id="detail-toggle-${escapeHtml(k.shareKey)}" style="display:none">
+        <td colspan="7" style="padding:0;border-bottom:1px solid var(--border)">
+          ${detailHtml}
         </td>
       </tr>`;
     });
@@ -212,6 +244,16 @@ async function dashboard(keys, adminSecret, env) {
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #login-form .field:first-child { flex: 1; min-width: 200px; }
   .footer { text-align: center; color: var(--muted); font-size: 0.7rem; margin-top: 32px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .detail-panel { padding: 16px 24px; background: #fafafa; border-top: 1px solid var(--line); }
+  .detail-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+  .detail-table th { padding: 8px 6px; text-align: left; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.65rem; border-bottom: 1px solid var(--border); }
+  .detail-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; }
+  .detail-table .num { text-align: right; }
+  .detail-table .cache-read { color: #0066cc; }
+  .detail-table .cache-creation { color: #cc6600; }
+  .detail-table .total { color: var(--text); }
+  .detail-table .total-col { text-align: right; }
+  .detail-more { color: var(--muted); font-size: 0.7rem; margin-top: 8px; text-align: center; letter-spacing: 0.04em; }
 </style>
 </head>
 <body>
@@ -328,6 +370,18 @@ async function dashboard(keys, adminSecret, env) {
       const r = await api("POST", "/admin/revoke", { shareKey: key });
       if (r.ok) { toast("Key revoked"); location.reload(); }
       else toast("Failed to revoke");
+    }
+
+    function toggleDetail(key) {
+      const toggle = document.getElementById("detail-toggle-" + key);
+      const panel = document.getElementById("detail-" + key);
+      if (!toggle) return;
+      const hidden = toggle.style.display === "none";
+      toggle.style.display = hidden ? "" : "none";
+      if (panel && !hidden) {
+        // Scroll detail into view
+        panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     }
 
     // Auto-login if secret in session
@@ -517,6 +571,26 @@ async function proxyRelay(request, env, ctx) {
           // buffer now holds only the incomplete trailing event
         }
         if (totalTokens > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
+        // Store per-request detail
+        ctx.waitUntil(
+          (async () => {
+            const winEnd = getCurrentWindowEnd();
+            const dk = `detail:${shareKey}:${winEnd}`;
+            const existing = await env.SHARE_KV.get(dk);
+            const arr = existing ? JSON.parse(existing) : [];
+            arr.push({
+              timestamp: new Date().toISOString(),
+              input: inputTokens,
+              output: outputTokens,
+              cacheRead: cacheReadTokens,
+              cacheCreation: cacheCreationTokens,
+              total: totalTokens,
+            });
+            if (arr.length > 200) arr.splice(0, arr.length - 200);
+            const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
+            await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
+          })()
+        );
       } catch (e) {
         // Stream interrupted — best-effort count what we have
       } finally {
@@ -556,6 +630,29 @@ async function proxyRelay(request, env, ctx) {
   }
 
   const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+
+  // Store per-request detail for dashboard
+  const detail = {
+    timestamp: new Date().toISOString(),
+    input: inputTokens,
+    output: outputTokens,
+    cacheRead: cacheReadTokens,
+    cacheCreation: cacheCreationTokens,
+    total,
+  };
+  ctx.waitUntil(
+    (async () => {
+      const winEnd = getCurrentWindowEnd();
+      const dk = `detail:${shareKey}:${winEnd}`;
+      const existing = await env.SHARE_KV.get(dk);
+      const arr = existing ? JSON.parse(existing) : [];
+      arr.push(detail);
+      if (arr.length > 200) arr.splice(0, arr.length - 200);
+      const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
+      await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
+    })()
+  );
+
   if (total > 0) {
     ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
   }
@@ -734,6 +831,23 @@ async function handleAdmin(request, env) {
       }
     }
 
+    // Per-request details (most recent first)
+    const winEnd = getCurrentWindowEnd();
+    const detailKey = `detail:${key}:${winEnd}`;
+    const detailRaw = await env.SHARE_KV.get(detailKey);
+    let details = detailRaw ? JSON.parse(detailRaw) : [];
+
+    // Aggregate breakdown
+    const breakdown = details.reduce(
+      (acc, d) => ({
+        input: acc.input + d.input,
+        output: acc.output + d.output,
+        cacheRead: acc.cacheRead + d.cacheRead,
+        cacheCreation: acc.cacheCreation + d.cacheCreation,
+      }),
+      { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
+    );
+
     return json({
       shareKey: key,
       expiresAt: data.expiresAt,
@@ -743,6 +857,8 @@ async function handleAdmin(request, env) {
       currentWindowUsed,
       windowUsage,
       percentUsed: Math.round((currentWindowUsed / data.tokenLimit) * 100),
+      breakdown,
+      details: details.reverse(),
     });
   }
 

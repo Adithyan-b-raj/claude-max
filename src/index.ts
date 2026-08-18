@@ -7,12 +7,22 @@ const WINDOW_ANCHOR_UTC_MS = (18 + 28 / 60) * 60 * 60 * 1000; // 18:28 UTC in ms
 // --- KV Keys ---
 // share:{shareKey}  → JSON: { expiresAt (ISO), tokenLimit, createdAt, name }
 // bucket:{shareKey}:{bucketStart} → token count for that 5-hour window
+// detail:{shareKey}:{bucketStart} → JSON array of per-request details
 
 interface ShareRecord {
   expiresAt: string;
   tokenLimit: number;
   createdAt: string;
   name: string;
+}
+
+interface RequestDetail {
+  timestamp: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  total: number;
 }
 
 export default {
@@ -99,31 +109,62 @@ export default {
       // Extract token usage from response
       let inputTokens = 0;
       let outputTokens = 0;
+      let cacheReadTokens = 0;
+      let cacheCreationTokens = 0;
 
       try {
         const parsed = JSON.parse(responseBody);
         if (parsed.usage) {
           inputTokens = parsed.usage.input_tokens || 0;
           outputTokens = parsed.usage.output_tokens || 0;
+          cacheReadTokens = parsed.usage.cache_read_input_tokens || 0;
+          cacheCreationTokens = parsed.usage.cache_creation_input_tokens || 0;
         }
       } catch {
         // Not JSON or no usage field — skip tracking
       }
 
-      const totalTokens = inputTokens + outputTokens;
+      const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+
+      // Store per-request detail for the dashboard
+      const requestDetail: RequestDetail = {
+        timestamp: new Date().toISOString(),
+        input: inputTokens,
+        output: outputTokens,
+        cacheRead: cacheReadTokens,
+        cacheCreation: cacheCreationTokens,
+        total: totalTokens,
+      };
+      ctx.waitUntil(
+        (async () => {
+          const windowEnd = getCurrentWindowEnd();
+          const detailKey = `detail:${shareKey}:${windowEnd}`;
+          const existingRaw = await env.SHARE_KV.get(detailKey);
+          let details: RequestDetail[] = existingRaw ? JSON.parse(existingRaw) : [];
+          details.push(requestDetail);
+          if (details.length > 200) details = details.slice(-200);
+          const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
+          await env.SHARE_KV.put(detailKey, JSON.stringify(details), { expirationTtl: ttlSec });
+        })()
+      );
 
       // Update usage in current 5-hour window (fire-and-forget with ctx.waitUntil)
       if (totalTokens > 0) {
         ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
       }
 
-      // Return response with custom headers showing remaining quota
+      // Return response with custom headers showing remaining quota + per-token breakdown
       const newHeaders = new Headers(response.headers);
       const currentWindow = await getWindowUsage(env, shareKey);
       const remaining = shareData.tokenLimit - currentWindow;
       newHeaders.set('X-RateLimit-Limit', String(shareData.tokenLimit));
       newHeaders.set('X-RateLimit-Remaining', String(Math.max(0, remaining)));
       newHeaders.set('X-RateLimit-Reset', new Date(getCurrentWindowEnd()).toISOString());
+      newHeaders.set('X-Tokens-Charged', String(totalTokens));
+      newHeaders.set('X-Tokens-Input', String(inputTokens));
+      newHeaders.set('X-Tokens-Output', String(outputTokens));
+      newHeaders.set('X-Tokens-Cache-Read', String(cacheReadTokens));
+      newHeaders.set('X-Tokens-Cache-Creation', String(cacheCreationTokens));
 
       return new Response(responseBody, {
         status: response.status,
@@ -192,8 +233,6 @@ async function handleListShares(request: Request, env: Env): Promise<Response> {
     return Response.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  // List all share keys (KV doesn't have list, so we return from cursor tracking)
-  // For simplicity, we track active shares via a separate index
   const indexRaw = await env.SHARE_KV.get('share:index', 'json');
   const index: string[] = indexRaw || [];
 
@@ -228,12 +267,11 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
     return Response.json({ error: '?key=<shareKey> required' }, { status: 400 });
   }
 
-  // For the stats endpoint, allow both admin auth AND the share key holder
+  // Allow both admin auth AND the share key holder
   const auth = request.headers.get('Authorization');
   const isAdmin = auth === `Bearer ${env.ADMIN_SECRET}`;
 
   if (!isAdmin) {
-    // Allow the share key holder to check their own stats
     const holderKey = request.headers.get('X-Share-Key');
     if (holderKey !== shareKey) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
@@ -258,8 +296,24 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
     };
   }
 
-  // Get current window usage
   const currentWindowTokens = await getWindowUsage(env, shareKey);
+
+  // Per-request breakdown for the current window (most recent first)
+  const windowEnd = getCurrentWindowEnd();
+  const detailKey = `detail:${shareKey}:${windowEnd}`;
+  const detailRaw = await env.SHARE_KV.get(detailKey);
+  let details: RequestDetail[] = detailRaw ? JSON.parse(detailRaw) : [];
+
+  // Aggregate per-type totals from details
+  const totals = details.reduce(
+    (acc, d) => ({
+      input: acc.input + d.input,
+      output: acc.output + d.output,
+      cacheRead: acc.cacheRead + d.cacheRead,
+      cacheCreation: acc.cacheCreation + d.cacheCreation,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
+  );
 
   return Response.json({
     shareKey,
@@ -270,6 +324,8 @@ async function handleStats(request: Request, env: Env): Promise<Response> {
     windowUsage,
     currentWindowUsed: currentWindowTokens,
     percentUsed: Math.round((currentWindowTokens / data.tokenLimit) * 100),
+    breakdown: totals,
+    details: details.reverse(),
   });
 }
 
