@@ -1,3 +1,8 @@
+// ===========================================================================
+// OpusMax Proxy — Cloudflare Pages Function
+// Handles: proxy relay, admin API, and serves the dashboard.
+// ===========================================================================
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
@@ -11,41 +16,19 @@ function json(body, status = 200) {
   });
 }
 
-function escapeHtml(str) {
-  return str.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-function countTokens(usage) {
-  if (!usage || typeof usage !== "object") return 0;
-  return (
-    (usage.input_tokens || 0) +
-    (usage.output_tokens || 0) +
-    (usage.cache_creation_input_tokens || 0) +
-    (usage.cache_read_input_tokens || 0)
-  );
-}
-
-function formatTokens(n) {
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
-  return String(n);
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 // --- Constants ---
-const WINDOW_MS = 5 * 60 * 60 * 1000; // 5-hour rolling window in ms
-// OpusMax resets at 11:58 PM IST = 6:28 PM UTC every day
-const WINDOW_ANCHOR_HOURS = 18;
+const WINDOW_MS = 5 * 60 * 60 * 1000; // 5-hour rolling window
+const WINDOW_ANCHOR_HOURS = 18;        // 18:28 UTC = 11:58 PM IST
 const WINDOW_ANCHOR_MINUTES = 28;
 
 function getCurrentWindowEnd() {
   const now = new Date();
-  // Anchor to today at 18:28 UTC (11:58 PM IST)
   const anchor = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), WINDOW_ANCHOR_HOURS, WINDOW_ANCHOR_MINUTES, 0, 0));
-
-  if (now <= anchor) {
-    return anchor.getTime();
-  }
-
+  if (now <= anchor) return anchor.getTime();
   const elapsed = now - anchor;
   const periods = Math.ceil(elapsed / WINDOW_MS);
   return anchor.getTime() + periods * WINDOW_MS;
@@ -56,8 +39,8 @@ function getShareKey(key) { return `share:${key}`; }
 function getBucketKey(key, windowEnd) { return `bucket:${key}:${windowEnd}`; }
 
 const ADMIN_LOGIN_LIMIT = 5;
-const ADMIN_LOGIN_WINDOW_SEC = 60; // counter TTL while in window
-const ADMIN_LOGIN_LOCKOUT_SEC = 900; // lockout after too many failures
+const ADMIN_LOGIN_WINDOW_SEC = 60;
+const ADMIN_LOGIN_LOCKOUT_SEC = 900;
 
 async function checkLoginRateLimit(env, ip) {
   const key = `loginfail:${ip}`;
@@ -79,8 +62,7 @@ async function getShare(env, key) {
 async function deleteShare(env, key) {
   await env.SHARE_KV.delete(getShareKey(key));
   const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-  const updated = index.filter((k) => k !== key);
-  await env.SHARE_KV.put("share:index", JSON.stringify(updated));
+  await env.SHARE_KV.put("share:index", JSON.stringify(index.filter(k => k !== key)));
 }
 
 async function addToIndex(env, key) {
@@ -91,412 +73,38 @@ async function addToIndex(env, key) {
 }
 
 async function getWindowUsage(env, shareKey) {
-  const windowEnd = getCurrentWindowEnd();
-  const bucketKey = getBucketKey(shareKey, windowEnd);
-  const raw = await env.SHARE_KV.get(bucketKey);
-  return parseInt(raw || "0", 10);
+  const bucketKey = getBucketKey(shareKey, getCurrentWindowEnd());
+  return parseInt(await env.SHARE_KV.get(bucketKey) || "0", 10);
 }
 
 async function incrementWindowUsage(env, shareKey, tokens) {
   const windowEnd = getCurrentWindowEnd();
   const bucketKey = getBucketKey(shareKey, windowEnd);
-  const current = parseInt((await env.SHARE_KV.get(bucketKey)) || "0", 10);
-  const newTotal = current + tokens;
-  // Re-read to handle concurrent writes — use max to never undercount
-  const latest = parseInt((await env.SHARE_KV.get(bucketKey)) || "0", 10);
-  const finalTotal = Math.max(newTotal, latest + tokens);
+  const current = parseInt(await env.SHARE_KV.get(bucketKey) || "0", 10);
+  const latest = parseInt(await env.SHARE_KV.get(bucketKey) || "0", 10);
+  const finalTotal = Math.max(current + tokens, latest + tokens);
   const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
   await env.SHARE_KV.put(bucketKey, String(finalTotal), { expirationTtl: ttlSec });
 }
 
 function generateKey(length) {
   const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const max = 256 - (256 % chars.length); // rejection sampling threshold
+  const max = 256 - (256 % chars.length);
   const result = [];
   while (result.length < length) {
     const arr = new Uint8Array(1);
     crypto.getRandomValues(arr);
-    if (arr[0] < max) {
-      result.push(chars[arr[0] % chars.length]);
-    }
+    if (arr[0] < max) result.push(chars[arr[0] % chars.length]);
   }
   return result.join("");
 }
 
-// --- Dashboard HTML ---
-async function dashboard(keys, adminSecret, env) {
-  const now = Date.now();
-  const windowEnd = getCurrentWindowEnd();
-
-  const rows = keys
-    .map(async (k) => {
-      const windowUsage = await getWindowUsage(env, k.shareKey);
-      const pct = k.tokenLimit > 0 ? Math.min(100, (windowUsage / k.tokenLimit) * 100) : 0;
-      const status = k.revoked
-        ? '<span class="status revoked">Revoked</span>'
-        : now > new Date(k.expiresAt).getTime()
-          ? '<span class="status expired">Expired</span>'
-          : pct >= 100
-            ? '<span class="status exceeded">Cap hit</span>'
-            : '<span class="status active">Active</span>';
-      const ttl =
-        now > new Date(k.expiresAt).getTime()
-          ? "expired"
-          : `${Math.max(0, Math.round((new Date(k.expiresAt).getTime() - now) / 3600000))}h left`;
-
-      // Load per-request details for this key
-      const winEnd = getCurrentWindowEnd();
-      const detailRaw = await env.SHARE_KV.get(`detail:${k.shareKey}:${winEnd}`);
-      const details = detailRaw ? JSON.parse(detailRaw) : [];
-      const detailRows = details.slice().reverse().slice(0, 20).map(d => {
-        const time = new Date(d.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        return `<tr class="detail-row">
-          <td>${time}</td>
-          <td class="num">${formatTokens(d.input)}</td>
-          <td class="num">${formatTokens(d.output)}</td>
-          <td class="num cache-read">${formatTokens(d.cacheRead)}</td>
-          <td class="num cache-creation">${formatTokens(d.cacheCreation)}</td>
-          <td class="num total"><strong>${formatTokens(d.total)}</strong></td>
-        </tr>`;
-      }).join('');
-
-      const detailHtml = details.length > 0 ? `
-        <div class="detail-panel" id="detail-${escapeHtml(k.shareKey)}">
-          <table class="detail-table">
-            <thead><tr><th>Time</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th class="total-col">Total</th></tr></thead>
-            <tbody>${detailRows || '<tr><td colspan="6" style="color:#999;text-align:center">No requests yet</td></tr>'}</tbody>
-          </table>
-          ${details.length > 20 ? `<p class="detail-more">Showing last 20 of ${details.length} requests</p>` : ''}
-        </div>` : '';
-
-      return `<tr>
-        <td>${escapeHtml(k.name)}</td>
-        <td><code>${escapeHtml(k.shareKey)}</code></td>
-        <td>${formatTokens(windowUsage)} / ${formatTokens(k.tokenLimit)}</td>
-        <td><div class="bar-wrap"><div class="bar" style="width:${pct.toFixed(1)}%"></div></div></td>
-        <td>${status}</td>
-        <td>${ttl}</td>
-        <td class="actions">
-          <button data-action="toggle-detail" data-key="${escapeHtml(k.shareKey)}">Details</button>
-          <button data-action="copy-key" data-key="${escapeHtml(k.shareKey)}">Copy</button>
-          <button data-action="revoke-key" data-key="${escapeHtml(k.shareKey)}" class="danger">Revoke</button>
-        </td>
-      </tr>
-      <tr class="detail-toggle" id="detail-toggle-${escapeHtml(k.shareKey)}" style="display:none">
-        <td colspan="7" style="padding:0;border-bottom:1px solid var(--border)">
-          ${detailHtml}
-        </td>
-      </tr>`;
-    });
-
-  const activeKeys = keys.filter((k) => !k.revoked && now <= new Date(k.expiresAt).getTime());
-  const windowUsages = await Promise.all(activeKeys.map((k) => getWindowUsage(env, k.shareKey)));
-  const totalUsed = windowUsages.reduce((a, u) => a + u, 0);
-  const totalCap = activeKeys.reduce((a, k) => a + k.tokenLimit, 0);
-  const activeCount = activeKeys.filter((k, i) => windowUsages[i] < k.tokenLimit).length;
-  const renderedRows = await Promise.all(rows);
-
-  const windowReset = new Date(getCurrentWindowEnd()).toLocaleString("en-US", {
-    hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata",
-  });
-  const remainingMin = Math.max(0, Math.round((windowEnd - now) / 60000));
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>OpusMax Proxy</title>
-<style>
-  :root { --bg: #ffffff; --card: #ffffff; --border: #000000; --text: #000000; --muted: #666666; --line: #e5e5e5; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 32px 24px; max-width: 1200px; margin: 0 auto; line-height: 1.5; }
-  h1 { font-size: 1.1rem; margin-bottom: 8px; font-weight: 500; letter-spacing: -0.01em; }
-  h2 { font-size: 0.7rem; margin-bottom: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
-  .card { background: var(--card); border: 1px solid var(--border); padding: 24px; margin-bottom: 2px; }
-  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border-top: 1px solid var(--border); border-left: 1px solid var(--border); margin-bottom: 24px; }
-  .stat { text-align: left; padding: 16px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-  .stat .value { font-size: 1.6rem; font-weight: 500; letter-spacing: -0.02em; }
-  .stat .label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; margin-top: 6px; font-weight: 500; }
-  form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
-  .field { display: flex; flex-direction: column; gap: 6px; }
-  label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 500; }
-  input { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; font-size: 0.85rem; outline: none; transition: border-color 0.15s; border-radius: 0; }
-  input:focus { border-color: var(--text); }
-  button { border: 1px solid var(--border); padding: 10px 20px; font-size: 0.8rem; font-weight: 500; cursor: pointer; color: var(--text); background: var(--text); color: var(--bg); transition: all 0.15s; letter-spacing: 0.02em; border-radius: 0; }
-  button:hover { opacity: 0.75; }
-  button.danger { background: var(--bg); color: var(--text); }
-  button.secondary { background: var(--bg); color: var(--text); }
-  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-  th { text-align: left; color: var(--muted); font-weight: 500; padding: 12px 8px; border-bottom: 1px solid var(--border); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
-  td { padding: 14px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  td code { font-size: 0.75rem; background: var(--bg); padding: 4px 8px; border: 1px solid var(--line); font-family: ui-monospace, monospace; letter-spacing: 0.02em; }
-  .bar-wrap { border-bottom: 1px solid var(--text); height: 16px; width: 100%; min-width: 80px; position: relative; }
-  .bar { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--text); transition: width 0.3s; }
-  .status { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
-  .status.active { text-decoration: underline; text-underline-offset: 3px; }
-  .status.expired, .status.exceeded { color: var(--muted); }
-  .status.revoked { text-decoration: line-through; color: var(--muted); }
-  .actions { display: flex; gap: 8px; }
-  .actions button { padding: 6px 14px; font-size: 0.72rem; background: var(--bg); color: var(--text); border: 1px solid var(--border); }
-  .empty { color: var(--muted); text-align: center; padding: 32px; font-size: 0.85rem; letter-spacing: 0.02em; }
-  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px); background: var(--text); color: var(--bg); padding: 12px 24px; font-size: 0.82rem; opacity: 0; transition: all 0.2s; pointer-events: none; z-index: 100; font-weight: 500; }
-  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  #login-form .field:first-child { flex: 1; min-width: 200px; }
-  .footer { text-align: center; color: var(--muted); font-size: 0.7rem; margin-top: 32px; letter-spacing: 0.04em; text-transform: uppercase; }
-  .detail-panel { padding: 16px 24px; background: #fafafa; border-top: 1px solid var(--line); }
-  .detail-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
-  .detail-table th { padding: 8px 6px; text-align: left; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.65rem; border-bottom: 1px solid var(--border); }
-  .detail-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; }
-  .detail-table .num { text-align: right; }
-  .detail-table .cache-read { color: #0066cc; }
-  .detail-table .cache-creation { color: #cc6600; }
-  .detail-table .total { color: var(--text); }
-  .detail-table .total-col { text-align: right; }
-  .detail-more { color: var(--muted); font-size: 0.7rem; margin-top: 8px; text-align: center; letter-spacing: 0.04em; }
-</style>
-</head>
-<body>
-
-  <!-- Login -->
-  <div id="login-section" class="card" style="max-width:420px;margin:60px auto">
-    <h1>OpusMax Proxy</h1>
-    <p style="color:var(--muted);font-size:0.85rem;margin-bottom:16px">Enter the admin secret to manage shared API keys.</p>
-    <form id="login-form" onsubmit="return doLogin(event)">
-      <div class="field">
-        <label>Admin secret</label>
-        <input type="password" id="secret" placeholder="Enter admin secret" autofocus />
-      </div>
-      <button type="submit">Unlock dashboard</button>
-    </form>
-  </div>
-
-  <!-- Dashboard (hidden until login) -->
-  <div id="dashboard" style="display:none">
-    <div class="card">
-      <h1>Create shared key</h1>
-      <form onsubmit="return createKey(event)" style="margin-top:12px">
-        <div class="field">
-          <label>Label</label>
-          <input id="f-name" placeholder="e.g. friend" />
-        </div>
-        <div class="field">
-          <label>TTL (days, 1–30)</label>
-          <input id="f-ttl" type="number" value="1" min="1" max="30" />
-        </div>
-        <div class="field">
-          <label>Token limit</label>
-          <input id="f-cap" type="number" value="100000" min="1000" step="1000" />
-        </div>
-        <button type="submit">Create key</button>
-      </form>
-    </div>
-
-    <div class="card">
-      <h1>Shared keys</h1>
-      <div class="grid">
-        <div class="stat"><div class="value">${keys.length}</div><div class="label">Total keys</div></div>
-        <div class="stat"><div class="value">${activeCount}</div><div class="label">Active</div></div>
-        <div class="stat"><div class="value">${formatTokens(totalUsed)}</div><div class="label">Tokens used (this window)</div></div>
-        <div class="stat"><div class="value">${formatTokens(totalCap)}</div><div class="label">Total cap</div></div>
-      </div>
-      <div class="card" style="margin-bottom:24px;padding:12px 24px;display:flex;gap:24px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:500">Window</span>
-        <span style="font-size:0.85rem">5-hour rolling &middot; resets at <strong>${windowReset} IST</strong></span>
-        <span style="font-size:0.85rem;color:var(--muted)">&middot; ${remainingMin}m remaining</span>
-      </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead><tr><th>Label</th><th>Key</th><th>Usage</th><th>Quota</th><th>Status</th><th>TTL</th><th></th></tr></thead>
-          <tbody>${renderedRows.length ? renderedRows.join("") : `<tr><td colspan="7" class="empty">No keys yet</td></tr>`}</tbody>
-        </table>
-      </div>
-      <div style="margin-top:16px">
-        <button class="secondary" onclick="location.reload()">Refresh</button>
-      </div>
-    </div>
-
-    <div class="footer">OpusMax Proxy &mdash; API keys managed securely via Cloudflare Workers + KV</div>
-  </div>
-
-  <div id="toast" class="toast"></div>
-
-  <script>
-    const SECRET = ${JSON.stringify(adminSecret)};
-    const API_BASE = "";
-
-    function toast(msg) {
-      const el = document.getElementById("toast");
-      el.textContent = msg;
-      el.classList.add("show");
-      setTimeout(() => el.classList.remove("show"), 2200);
-    }
-
-    async function api(method, path, body) {
-      const opts = { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + SECRET } };
-      if (body) opts.body = JSON.stringify(body);
-      const r = await fetch(API_BASE + path, opts);
-      if (r.status === 401) { alert("Invalid admin secret"); return; }
-      return r;
-    }
-
-    function doLogin(e) {
-      e.preventDefault();
-      const v = document.getElementById("secret").value.trim();
-      if (!v) return false;
-      sessionStorage.setItem("adminSecret", v);
-      location.reload();
-      return false;
-    }
-
-    async function createKey(e) {
-      e.preventDefault();
-      const name = document.getElementById("f-name").value.trim() || "shared";
-      const ttl = parseInt(document.getElementById("f-ttl").value) || 1;
-      const cap = parseInt(document.getElementById("f-cap").value) || 100000;
-      const r = await api("POST", "/admin/create", { days: ttl, tokenLimit: cap, name });
-      const data = await r.json();
-      if (r.ok) { toast("Key created: " + data.shareKey); location.reload(); }
-      else toast(data.error || "Error creating key");
-      return false;
-    }
-
-    async function copyKey(key) {
-      await navigator.clipboard.writeText(key);
-      toast("Copied: " + key);
-    }
-
-    async function revokeKey(key) {
-      const r = await api("POST", "/admin/revoke", { shareKey: key });
-      if (r.ok) { toast("Key revoked"); location.reload(); }
-      else toast("Failed to revoke");
-    }
-
-    function toggleDetail(key) {
-      const toggle = document.getElementById("detail-toggle-" + key);
-      if (!toggle) return;
-      const hidden = toggle.style.display === "none";
-      toggle.style.display = hidden ? "" : "none";
-      if (!hidden) {
-        document.getElementById("detail-" + key)?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
-    }
-
-    // Event delegation for action buttons
-    document.addEventListener("click", (e) => {
-      const btn = e.target.closest("button[data-action]");
-      if (!btn) return;
-      const key = btn.dataset.key;
-      const action = btn.dataset.action;
-      if (action === "toggle-detail") toggleDetail(key);
-      else if (action === "copy-key") copyKey(key);
-      else if (action === "revoke-key") revokeKey(key);
-    });
-
-    // Auto-login if secret in session
-    if (sessionStorage.getItem("adminSecret")) {
-      document.getElementById("login-section").style.display = "none";
-      document.getElementById("dashboard").style.display = "";
-    }
-  </script>
-</body>
-</html>`;
-}
-
-// --- Pages Function handler ---
-// Pages Functions use `onRequest` with a context object, not Worker-style `fetch`.
-export const onRequest = async (context) => {
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const path = url.pathname;
-
-  // CORS preflight
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
-
-  // ---- Proxy relay: /v1/messages ----
-  if (path === "/v1/messages" && request.method === "POST") {
-    return proxyRelay(request, env, context);
-  }
-
-  // ---- Model discovery: /v1/models ----
-  if (path === "/v1/models" && request.method === "GET") {
-    return proxyModels(request, env);
-  }
-
-  // ---- Admin routes (require Bearer admin secret) ----
-  if (path.startsWith("/admin")) {
-    return handleAdmin(request, env);
-  }
-
-  // ---- Health check ----
-  if (path === "/health") {
-    return json({ status: "ok", timestamp: new Date().toISOString() });
-  }
-
-  // ---- Everything else: serve static files ----
-  // On Pages, env.ASSETS is the static asset fetcher
-  if (env.ASSETS) {
-    return env.ASSETS.fetch(request);
-  }
-
-  // Fallback: serve the dashboard
-  if (path === "/" || path === "/index.html") {
-    const adminSecret = await env.SHARE_KV.get("adminSecret");
-    if (!adminSecret) {
-      // First-time setup screen
-      return new Response(dashboard([], "", env), {
-        headers: { "content-type": "text/html" },
-      });
-    }
-    const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-    const keys = [];
-    for (const k of index) {
-      const data = await getShare(env, k);
-      if (data) keys.push({ ...data, shareKey: k, id: k });
-    }
-    return new Response(dashboard(keys, adminSecret, env), {
-      headers: { "content-type": "text/html" },
-    });
-  }
-
-  return json({ error: "not found" }, 404);
-};
-
-// ---- Model discovery ----
-async function proxyModels(request, env) {
-  // Validate share key for model listing
-  const shareKey = request.headers.get("x-share-key")
-    || request.headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim()
-    || new URL(request.url).searchParams.get("shareKey");
-  if (!shareKey) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
-
-  const record = await getShare(env, shareKey);
-  if (!record) return json({ error: "Invalid share key" }, 403);
-
-  const upstream = await fetch("https://api.opusmax.pro/v1/models", {
-    headers: {
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-  });
-
-  const data = await upstream.json();
-  return new Response(JSON.stringify(data), {
-    status: upstream.status,
-    headers: { "content-type": "application/json", ...corsHeaders },
-  });
-}
-
-// ---- Proxy relay ----
+// ===========================================================================
+// Proxy relay — forwards to Anthropic API via opusmax.pro
+// ===========================================================================
 async function proxyRelay(request, env, ctx) {
   const shareKey = request.headers.get("x-share-key")
-    || (() => {
-      const auth = request.headers.get("Authorization");
-      if (auth && auth.startsWith("Bearer ")) return auth.slice(7);
-      return null;
-    })()
+    || request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "").trim()
     || new URL(request.url).searchParams.get("shareKey");
 
   if (!shareKey) return json({ error: "Missing X-Share-Key header or shareKey param" }, 401);
@@ -514,8 +122,6 @@ async function proxyRelay(request, env, ctx) {
   }
 
   const body = await request.text();
-
-  // Detect stream mode from request body
   let isStream = false;
   try { isStream = JSON.parse(body).stream === true; } catch {}
 
@@ -531,19 +137,16 @@ async function proxyRelay(request, env, ctx) {
 
   const contentType = upstream.headers.get("content-type") || "";
 
-  // --- Streaming (SSE): pipe through, parse usage in real-time ---
+  // --- Streaming (SSE) ---
   if (isStream && contentType.includes("text/event-stream") && upstream.body) {
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
     const reader = upstream.body.getReader();
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let cacheReadTokens = 0;
-    let cacheCreationTokens = 0;
-    let buffer = "";
+    let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreationTokens = 0;
     let totalTokens = 0;
+    let buffer = "";
 
     (async () => {
       try {
@@ -554,13 +157,12 @@ async function proxyRelay(request, env, ctx) {
           buffer += chunk;
           await writer.write(encoder.encode(chunk));
 
-          // Extract complete SSE events (delimited by \n\n) and parse usage
           let eventEnd;
           while ((eventEnd = buffer.indexOf("\n\n")) !== -1) {
             const eventText = buffer.slice(0, eventEnd);
             buffer = buffer.slice(eventEnd + 2);
             for (const line of eventText.split("\n")) {
-              if (line.startsWith("data: ") && line.includes("\"usage\"")) {
+              if (line.startsWith("data: ") && line.includes('"usage"')) {
                 try {
                   const evt = JSON.parse(line.slice(6));
                   if (evt.type === "message_start" && evt.message?.usage) {
@@ -577,39 +179,18 @@ async function proxyRelay(request, env, ctx) {
               }
             }
           }
-          // buffer now holds only the incomplete trailing event
         }
-        if (totalTokens > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
-        // Store per-request detail
-        ctx.waitUntil(
-          (async () => {
-            const winEnd = getCurrentWindowEnd();
-            const dk = `detail:${shareKey}:${winEnd}`;
-            const existing = await env.SHARE_KV.get(dk);
-            const arr = existing ? JSON.parse(existing) : [];
-            arr.push({
-              timestamp: new Date().toISOString(),
-              input: inputTokens,
-              output: outputTokens,
-              cacheRead: cacheReadTokens,
-              cacheCreation: cacheCreationTokens,
-              total: totalTokens,
-            });
-            if (arr.length > 200) arr.splice(0, arr.length - 200);
-            const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
-            await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
-          })()
-        );
-      } catch (e) {
-        // Stream interrupted — best-effort count what we have
-      } finally {
-        await writer.close();
-      }
+        if (totalTokens > 0) {
+          ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
+          ctx.waitUntil(storeDetail(env, shareKey, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, totalTokens));
+        }
+      } catch { /* stream interrupted */ }
+      finally { await writer.close(); }
     })();
 
     const headers = new Headers(upstream.headers);
     headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage)));
+    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage - totalTokens)));
     headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
     headers.set("X-Tokens-Charged", String(totalTokens));
     headers.set("X-Tokens-Input", String(inputTokens));
@@ -619,13 +200,9 @@ async function proxyRelay(request, env, ctx) {
     return new Response(readable, { status: upstream.status, headers });
   }
 
-  // --- Non-streaming: buffer and extract usage from JSON ---
+  // --- Non-streaming ---
   const respBody = await upstream.text();
-  let inputTokens = 0,
-    outputTokens = 0,
-    cacheReadTokens = 0,
-    cacheCreationTokens = 0;
-
+  let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheCreationTokens = 0;
   try {
     const parsed = JSON.parse(respBody);
     if (parsed.usage) {
@@ -634,36 +211,13 @@ async function proxyRelay(request, env, ctx) {
       cacheReadTokens = parsed.usage.cache_read_input_tokens || 0;
       cacheCreationTokens = parsed.usage.cache_creation_input_tokens || 0;
     }
-  } catch {
-    // Non-JSON / unexpected format
-  }
+  } catch {}
 
   const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
 
-  // Store per-request detail for dashboard
-  const detail = {
-    timestamp: new Date().toISOString(),
-    input: inputTokens,
-    output: outputTokens,
-    cacheRead: cacheReadTokens,
-    cacheCreation: cacheCreationTokens,
-    total,
-  };
-  ctx.waitUntil(
-    (async () => {
-      const winEnd = getCurrentWindowEnd();
-      const dk = `detail:${shareKey}:${winEnd}`;
-      const existing = await env.SHARE_KV.get(dk);
-      const arr = existing ? JSON.parse(existing) : [];
-      arr.push(detail);
-      if (arr.length > 200) arr.splice(0, arr.length - 200);
-      const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
-      await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
-    })()
-  );
-
   if (total > 0) {
     ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
+    ctx.waitUntil(storeDetail(env, shareKey, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, total));
   }
 
   const headers = new Headers();
@@ -671,103 +225,104 @@ async function proxyRelay(request, env, ctx) {
   for (const [key, val] of upstream.headers) {
     if (allowed.has(key.toLowerCase())) headers.set(key, val);
   }
-  const windowAfterThis = windowUsage + total;
   headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-  headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowAfterThis)));
+  headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage - total)));
   headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
   headers.set("X-Tokens-Charged", String(total));
   headers.set("X-Tokens-Input", String(inputTokens));
   headers.set("X-Tokens-Output", String(outputTokens));
   headers.set("X-Tokens-Cache-Read", String(cacheReadTokens));
   headers.set("X-Tokens-Cache-Creation", String(cacheCreationTokens));
-
   return new Response(respBody, { status: upstream.status, headers });
 }
 
-// ---- Admin handler ----
-async function handleAdmin(request, env) {
-  try {
-    const auth = request.headers.get("Authorization");
-    const adminSecret = await env.SHARE_KV.get("adminSecret");
-    const path = new URL(request.url).pathname;
+// Store per-request detail for dashboard
+async function storeDetail(env, shareKey, input, output, cacheRead, cacheCreation, total) {
+  const winEnd = getCurrentWindowEnd();
+  const dk = `detail:${shareKey}:${winEnd}`;
+  const existing = await env.SHARE_KV.get(dk);
+  const arr = existing ? JSON.parse(existing) : [];
+  arr.push({ timestamp: new Date().toISOString(), input, output, cacheRead, cacheCreation, total });
+  if (arr.length > 200) arr.splice(0, arr.length - 200);
+  const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
+  await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
+}
 
-    // Bootstrap: first time setup (no auth required)
-    if (!adminSecret) {
-      if (request.method === "POST" && path === "/admin/init") {
-        const body = await request.json().catch(() => ({}));
-        if (!body.adminSecret) return json({ error: "adminSecret required" }, 400);
-        await env.SHARE_KV.put("adminSecret", body.adminSecret);
-        return json({ ok: true });
-      }
-      return json({ error: "not_initialized", message: "POST /admin/init with {adminSecret: '...'}" }, 503);
-    }
+// ===========================================================================
+// Pages Function entry point
+// ===========================================================================
+export async function onRequest(context) {
+  const { request, env } = context;
+  const url = new URL(request.url);
+  const path = url.pathname;
 
-    // GET /admin/view — serve a login form (avoids URL-encoding issues with special chars)
-    if (request.method === "GET" && path === "/admin/view") {
-      return new Response(`<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>OpusMax Admin</title>
-<style>
-  body { font-family: ui-sans-serif, system-ui, sans-serif; background: #fff; color: #000; padding: 60px 24px; max-width: 420px; margin: 0 auto; }
-  h1 { font-size: 1.1rem; font-weight: 500; margin-bottom: 8px; }
-  p { color: #666; font-size: 0.85rem; margin-bottom: 16px; }
-  input { border: 1px solid #000; padding: 10px 12px; font-size: 0.85rem; width: 100%; outline: none; }
-  button { border: 1px solid #000; background: #000; color: #fff; padding: 10px 20px; font-size: 0.8rem; cursor: pointer; margin-top: 12px; }
-</style></head>
-<body>
-  <h1>OpusMax Admin</h1>
-  <p>Enter your admin secret to continue.</p>
-  <form method="POST" action="/admin/view">
-    <input type="password" name="secret" placeholder="Admin secret" autofocus />
-    <button type="submit">Login</button>
-  </form>
-</body></html>`, { headers: { "content-type": "text/html" } });
-    }
+  // CORS preflight
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
 
-    // POST /admin/view — validate secret and show dashboard
-    if (request.method === "POST" && path === "/admin/view") {
-      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
-      if (!(await checkLoginRateLimit(env, ip))) {
-        return json({ error: "Too many failed login attempts. Try again later." }, 429);
-      }
-      const form = await request.formData().catch(() => null);
-      const secret = form ? form.get("secret") : "";
-      if (!secret || secret !== adminSecret) {
-        return json({ error: "unauthorized" }, 401);
-      }
-      await recordLoginSuccess(env, ip);
-      const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-      const rawShares = await Promise.all(index.map(k => getShare(env, k)));
-      const keys = [];
-      for (let i = 0; i < index.length; i++) {
-        if (!rawShares[i]) continue;
-        keys.push({ ...rawShares[i], shareKey: index[i], id: index[i] });
-      }
-      const windowUsages = await Promise.all(keys.map(k => getWindowUsage(env, k.shareKey)));
-      for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
-      return new Response(await dashboard(keys, adminSecret, env), {
-        headers: { "content-type": "text/html" },
-      });
-    }
+  // Proxy relay
+  if (path === "/v1/messages" && request.method === "POST") {
+    return proxyRelay(request, env, context);
+  }
 
-    // All admin routes require Bearer auth
-    if (auth !== `Bearer ${adminSecret}`) return json({ error: "unauthorized" }, 401);
+  // Health check
+  if (path === "/health" && request.method === "GET") {
+    return json({ status: "ok" });
+  }
 
-    // GET /admin — serve the dashboard HTML
-    if (request.method === "GET" && (path === "/admin" || path === "/admin/")) {
-      const index = (await env.SHARE_KV.get("share:index", "json")) || [];
-      const rawShares = await Promise.all(index.map(k => getShare(env, k)));
-      const keys = [];
-      for (let i = 0; i < index.length; i++) {
-        if (!rawShares[i]) continue;
-        keys.push({ ...rawShares[i], shareKey: index[i], id: index[i] });
-      }
-      const windowUsages = await Promise.all(keys.map(k => getWindowUsage(env, k.shareKey)));
-      for (let i = 0; i < keys.length; i++) keys[i].windowUsage = windowUsages[i];
-      return new Response(await dashboard(keys, adminSecret, env), {
-        headers: { "content-type": "text/html" },
-      });
-    }
+  // Admin routes — serve the dashboard HTML
+  if (path.startsWith("/admin")) {
+    const adminSecret = env.ADMIN_SECRET;
+    if (!adminSecret) return json({ error: "Set ADMIN_SECRET env var" }, 503);
+    return handleAdmin(request, env, adminSecret);
+  }
+
+  // Serve dashboard.html as a static file
+  if (request.method === "GET" && path === "/dashboard.html") {
+    if (env.ASSETS) return env.ASSETS.fetch(request);
+  }
+
+  // Everything else: serve static files via ASSETS
+  if (env.ASSETS) return env.ASSETS.fetch(request);
+
+  // Fallback
+  return json({ error: "not found" }, 404);
+}
+
+// ===========================================================================
+// Admin handler — serves dashboard + JSON API
+// ===========================================================================
+async function handleAdmin(request, env, adminSecret) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const auth = request.headers.get("Authorization") || "";
+  const isFormAuth = request.method === "POST" && path === "/admin/view";
+
+  // Allow form-based login (POST /admin/view)
+  if (!isFormAuth && !auth.startsWith("Bearer ")) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  // GET /admin or /admin/view → redirect to the SPA dashboard
+  if ((request.method === "GET" && (path === "/admin" || path === "/admin/")) || path === "/admin/view") {
+    return serveAdminPage(env, new URL(request.url).origin);
+  }
+
+  // POST /admin/view → validate secret, then redirect to dashboard
+  if (isFormAuth) {
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    if (!(await checkLoginRateLimit(env, ip))) return json({ error: "Too many failed attempts" }, 429);
+    const form = await request.formData().catch(() => null);
+    const secret = form ? form.get("secret") : "";
+    if (!secret || secret !== adminSecret) return json({ error: "unauthorized" }, 401);
+    await recordLoginSuccess(env, ip);
+    return serveAdminPage(env, new URL(request.url).origin);
+  }
+
+  // All remaining admin routes need Bearer auth
+  const token = auth.slice(7);
+  if (token !== adminSecret) return json({ error: "unauthorized" }, 401);
 
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
@@ -787,30 +342,13 @@ async function handleAdmin(request, env) {
     const days = Math.min(30, Math.max(1, parseInt(body.days) || 1));
     const tokenLimit = Math.min(10_000_000, Math.max(1000, parseInt(body.tokenLimit) || 100000));
     const name = (body.name || "shared").slice(0, 50);
-
     const shareKey = generateKey(16);
     const now = new Date();
     const expiresAt = new Date(now.getTime() + days * 86400000);
-
-    const record = {
-      expiresAt: expiresAt.toISOString(),
-      tokenLimit,
-      createdAt: now.toISOString(),
-      name,
-    };
-
-    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record), {
-      expirationTtl: Math.ceil((days + 1) * 86400),
-    });
+    const record = { expiresAt: expiresAt.toISOString(), tokenLimit, createdAt: now.toISOString(), name };
+    await env.SHARE_KV.put(`share:${shareKey}`, JSON.stringify(record), { expirationTtl: Math.ceil((days + 1) * 86400) });
     await addToIndex(env, shareKey);
-
-    return json({
-      shareKey,
-      expiresAt: record.expiresAt,
-      tokenLimit,
-      name,
-      curl: `curl -X POST https://${request.headers.get("host")}/v1/messages -H "X-Share-Key: ${shareKey}" -H "Content-Type: application/json" -d '{...}'`,
-    }, 201);
+    return json({ shareKey, expiresAt: record.expiresAt, tokenLimit, name, curl: `curl -X POST https://${request.headers.get("host")}/v1/messages -H "X-Share-Key: ${shareKey}" -H "Content-Type: application/json" -d '{...}'` }, 201);
   }
 
   // Revoke key
@@ -821,7 +359,7 @@ async function handleAdmin(request, env) {
     return json({ ok: true });
   }
 
-  // Stats
+  // Stats (with per-request details + token breakdown)
   if (request.method === "GET" && path.startsWith("/admin/stats")) {
     const key = new URL(request.url).searchParams.get("key");
     if (!key) return json({ error: "?key=<shareKey> required" }, 400);
@@ -832,39 +370,21 @@ async function handleAdmin(request, env) {
     const windowUsage = {};
     for (let i = 0; i < 6; i++) {
       const windowEnd = getCurrentWindowEnd() - (i + 1) * WINDOW_MS;
-      const bucketKey = getBucketKey(key, windowEnd);
-      const v = await env.SHARE_KV.get(bucketKey);
-      if (v) {
-        const dateKey = new Date(windowEnd).toISOString().split("T")[0];
-        windowUsage[dateKey] = parseInt(v, 10);
-      }
+      const v = await env.SHARE_KV.get(getBucketKey(key, windowEnd));
+      if (v) windowUsage[new Date(windowEnd).toISOString().split("T")[0]] = parseInt(v, 10);
     }
 
-    // Per-request details (most recent first)
-    const winEnd = getCurrentWindowEnd();
-    const detailKey = `detail:${key}:${winEnd}`;
-    const detailRaw = await env.SHARE_KV.get(detailKey);
-    let details = detailRaw ? JSON.parse(detailRaw) : [];
-
-    // Aggregate breakdown
+    const detailRaw = await env.SHARE_KV.get(`detail:${key}:${getCurrentWindowEnd()}`);
+    const details = detailRaw ? JSON.parse(detailRaw) : [];
     const breakdown = details.reduce(
-      (acc, d) => ({
-        input: acc.input + d.input,
-        output: acc.output + d.output,
-        cacheRead: acc.cacheRead + d.cacheRead,
-        cacheCreation: acc.cacheCreation + d.cacheCreation,
-      }),
+      (acc, d) => ({ input: acc.input + d.input, output: acc.output + d.output, cacheRead: acc.cacheRead + d.cacheRead, cacheCreation: acc.cacheCreation + d.cacheCreation }),
       { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }
     );
 
     return json({
-      shareKey: key,
-      expiresAt: data.expiresAt,
-      tokenLimit: data.tokenLimit,
-      createdAt: data.createdAt,
-      name: data.name,
-      currentWindowUsed,
-      windowUsage,
+      shareKey: key, expiresAt: data.expiresAt, tokenLimit: data.tokenLimit,
+      createdAt: data.createdAt, name: data.name,
+      currentWindowUsed, windowUsage,
       percentUsed: Math.round((currentWindowUsed / data.tokenLimit) * 100),
       breakdown,
       details: details.reverse(),
@@ -872,8 +392,14 @@ async function handleAdmin(request, env) {
   }
 
   return json({ error: "not found" }, 404);
-  } catch (err) {
-    console.error("Admin handler error:", err);
-    return json({ error: "internal_error", message: err.message }, 500);
-  }
+}
+
+// ===========================================================================
+// Serve the admin SPA — redirects to /dashboard.html (static asset)
+// ===========================================================================
+async function serveAdminPage(env, origin) {
+  return new Response("", {
+    status: 302,
+    headers: { Location: `${origin}/dashboard.html` },
+  });
 }

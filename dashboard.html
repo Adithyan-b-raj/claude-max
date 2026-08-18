@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>OpusMax Proxy</title>
+<style>
+  :root {
+    --bg: #ffffff; --border: #000000; --text: #000000;
+    --muted: #666666; --line: #e5e5e5; --panel: #fafafa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    padding: 32px 24px; max-width: 1200px; margin: 0 auto; line-height: 1.5;
+  }
+  h1 { font-size: 1.1rem; font-weight: 500; letter-spacing: -0.01em; }
+  h2 { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; font-weight: 500; }
+
+  /* Cards */
+  .card { border: 1px solid var(--border); padding: 24px; margin-bottom: 2px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    border: 1px solid var(--border); border-bottom: none;
+    margin-bottom: 24px;
+  }
+  .stat { padding: 16px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .stat:last-child { border-right: none; }
+  .stat .value { font-size: 1.6rem; font-weight: 500; }
+  .stat .label {
+    font-size: 0.65rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.1em; margin-top: 6px; font-weight: 500;
+  }
+
+  /* Form */
+  form { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  label {
+    font-size: 0.7rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.08em; font-weight: 500;
+  }
+  input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; font-size: 0.85rem; outline: none;
+  }
+  input:focus { border-color: var(--text); }
+  button {
+    border: 1px solid var(--border); padding: 10px 20px;
+    font-size: 0.8rem; font-weight: 500; cursor: pointer;
+    background: var(--text); color: var(--bg); letter-spacing: 0.02em;
+  }
+  button:hover { opacity: 0.75; }
+  button.danger { background: var(--bg); color: var(--text); }
+  button.secondary { background: var(--bg); color: var(--text); }
+  button.small { padding: 6px 14px; font-size: 0.72rem; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  th {
+    text-align: left; color: var(--muted); font-weight: 500; padding: 12px 8px;
+    border-bottom: 1px solid var(--border); font-size: 0.7rem;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  td { padding: 14px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td code {
+    font-size: 0.75rem; padding: 4px 8px; border: 1px solid var(--line);
+    font-family: ui-monospace, monospace;
+  }
+
+  /* Progress bar */
+  .bar-wrap { border-bottom: 1px solid var(--text); height: 16px; width: 100%; min-width: 80px; position: relative; }
+  .bar { position: absolute; bottom: 0; left: 0; height: 2px; background: var(--text); transition: width 0.3s; }
+
+  /* Status badges */
+  .status { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500; }
+  .status.active { text-decoration: underline; text-underline-offset: 3px; }
+  .status.expired, .status.exceeded { color: var(--muted); }
+  .status.revoked { text-decoration: line-through; color: var(--muted); }
+
+  /* Actions */
+  .actions { display: flex; gap: 8px; }
+  .actions button { padding: 6px 14px; font-size: 0.72rem; background: var(--bg); color: var(--text); }
+
+  /* Detail panel — THIS IS THE FIX */
+  .detail-toggle { background: var(--panel); }
+  .detail-toggle td { padding: 0; border-bottom: 2px solid var(--border); }
+  .detail-inner { padding: 16px 24px; overflow-x: auto; }
+  .detail-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+  .detail-table th {
+    padding: 8px 6px; text-align: left; font-weight: 500; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.65rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; }
+  .detail-table .num { text-align: right; }
+  .detail-table .cr { color: #0052cc; }
+  .detail-table .cw { color: #b35900; }
+  .detail-table .tot { font-weight: 600; }
+  .detail-empty { text-align: center; color: var(--muted); padding: 16px; font-size: 0.8rem; }
+  .detail-more { color: var(--muted); font-size: 0.7rem; margin-top: 8px; text-align: center; }
+
+  /* Misc */
+  .empty { color: var(--muted); text-align: center; padding: 32px; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px);
+    background: var(--text); color: var(--bg); padding: 12px 24px;
+    font-size: 0.82rem; opacity: 0; transition: all 0.2s; pointer-events: none; z-index: 100;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .hidden { display: none !important; }
+  .footer { text-align: center; color: var(--muted); font-size: 0.7rem; margin-top: 32px; text-transform: uppercase; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-section" class="card" style="max-width:420px;margin:60px auto">
+  <h1>OpusMax Proxy</h1>
+  <p style="color:var(--muted);font-size:0.85rem;margin:8px 0 16px">Enter the admin secret to manage shared API keys.</p>
+  <form id="login-form">
+    <div class="field" style="flex:1">
+      <label>Admin secret</label>
+      <input type="password" id="secret" placeholder="Enter admin secret" autofocus />
+    </div>
+    <button type="submit">Unlock dashboard</button>
+  </form>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="hidden">
+  <div class="card">
+    <h1>Create shared key</h1>
+    <form id="create-form" style="margin-top:12px">
+      <div class="field"><label>Label</label><input id="f-name" placeholder="e.g. friend" /></div>
+      <div class="field"><label>TTL (days)</label><input id="f-ttl" type="number" value="1" min="1" max="30" /></div>
+      <div class="field"><label>Token limit</label><input id="f-cap" type="number" value="100000" min="1000" step="1000" /></div>
+      <button type="submit">Create key</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h1>Shared keys</h1>
+    <div class="grid">
+      <div class="stat"><div class="value" id="s-total">—</div><div class="label">Total keys</div></div>
+      <div class="stat"><div class="value" id="s-active">—</div><div class="label">Active</div></div>
+      <div class="stat"><div class="value" id="s-used">—</div><div class="label">Tokens used (window)</div></div>
+      <div class="stat"><div class="value" id="s-cap">—</div><div class="label">Total cap</div></div>
+    </div>
+    <div style="padding:12px 24px;display:flex;gap:24px;align-items:center;flex-wrap:wrap;border:1px solid var(--border);border-top:none;margin-bottom:24px">
+      <span style="font-size:0.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;font-weight:500">Window</span>
+      <span style="font-size:0.85rem">5-hour rolling &middot; resets at <strong id="s-reset">—</strong></span>
+      <span style="font-size:0.85rem;color:var(--muted)" id="s-remaining"></span>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Label</th><th>Key</th><th>Usage</th><th>Quota</th><th>Status</th><th>TTL</th><th></th></tr></thead>
+        <tbody id="keys-tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <div style="margin-top:16px">
+      <button class="secondary" onclick="location.reload()">Refresh</button>
+    </div>
+  </div>
+
+  <div class="footer">OpusMax Proxy &mdash; Cloudflare Workers + KV</div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+  const BASE = ""; // same-origin
+
+  // ── Helpers ──
+  function $(id) { return document.getElementById(id); }
+  function fmt(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+    return String(n);
+  }
+  function esc(s) {
+    return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function toast(msg) {
+    const el = $("toast"); el.textContent = msg; el.classList.add("show");
+    setTimeout(() => el.classList.remove("show"), 2200);
+  }
+  function secret() { return sessionStorage.getItem("adminSecret") || ""; }
+
+  async function api(method, path, body) {
+    const opts = { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + secret() } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetch(BASE + path, opts);
+    if (r.status === 401) { sessionStorage.removeItem("adminSecret"); location.reload(); return; }
+    return r;
+  }
+
+  // ── Login ──
+  $("login-form").addEventListener("submit", e => {
+    e.preventDefault();
+    const v = $("secret").value.trim();
+    if (!v) return;
+    sessionStorage.setItem("adminSecret", v);
+    location.reload();
+  });
+
+  // ── Create key ──
+  $("create-form").addEventListener("submit", async e => {
+    e.preventDefault();
+    const name = $("f-name").value.trim() || "shared";
+    const days = parseInt($("f-ttl").value) || 1;
+    const cap = parseInt($("f-cap").value) || 100000;
+    const r = await api("POST", "/admin/create", { days, tokenLimit: cap, name });
+    if (r && r.ok) { toast("Key created"); location.reload(); }
+    else toast("Failed to create key");
+  });
+
+  // ── Event delegation for action buttons ──
+  document.addEventListener("click", e => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const key = btn.dataset.key;
+    const action = btn.dataset.action;
+
+    if (action === "toggle-detail") toggleDetail(key);
+    else if (action === "copy-key") { navigator.clipboard.writeText(key).then(() => toast("Copied")); }
+    else if (action === "revoke-key") revokeKey(key);
+  });
+
+  async function revokeKey(key) {
+    const r = await api("POST", "/admin/revoke", { shareKey: key });
+    if (r && r.ok) { toast("Revoked"); loadDashboard(); }
+    else toast("Failed");
+  }
+
+  function toggleDetail(key) {
+    const row = $("dt-" + key);
+    if (!row) return;
+    const open = row.classList.toggle("hidden");
+    if (!open) {
+      // opened — ensure content is loaded
+      const inner = row.querySelector(".detail-inner");
+      if (inner && !inner.dataset.loaded) {
+        inner.dataset.loaded = "1";
+        loadDetails(key, inner);
+      }
+    }
+  }
+
+  async function loadDetails(key, container) {
+    container.innerHTML = '<p class="detail-empty">Loading…</p>';
+    const r = await api("GET", "/admin/stats?key=" + encodeURIComponent(key));
+    if (!r) return;
+    const data = await r.json();
+    const rows = (data.details || []).slice().reverse().slice(0, 20);
+
+    if (!rows.length) {
+      container.innerHTML = '<p class="detail-empty">No requests yet</p>';
+      return;
+    }
+
+    const trs = rows.map(d => {
+      const t = new Date(d.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      return `<tr>
+        <td>${t}</td>
+        <td class="num">${fmt(d.input)}</td>
+        <td class="num">${fmt(d.output)}</td>
+        <td class="num cr">${fmt(d.cacheRead)}</td>
+        <td class="num cw">${fmt(d.cacheCreation)}</td>
+        <td class="num tot">${fmt(d.total)}</td>
+      </tr>`;
+    }).join("");
+
+    container.innerHTML = `
+      <table class="detail-table">
+        <thead><tr><th>Time</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th></tr></thead>
+        <tbody>${trs}</tbody>
+      </table>
+      ${rows.length >= 20 ? '<p class="detail-more">Showing last 20 requests</p>' : ''}
+    `;
+  }
+
+  // ── Load dashboard data ──
+  async function loadDashboard() {
+    const r = await api("GET", "/admin/keys");
+    if (!r) return;
+    const { keys } = await r.json();
+    const tbody = $("keys-tbody");
+
+    if (!keys.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">No keys yet</td></tr>';
+      $("s-total").textContent = "0"; $("s-active").textContent = "0";
+      $("s-used").textContent = "0"; $("s-cap").textContent = "0";
+      return;
+    }
+
+    // Fetch usage for all active keys in parallel
+    const active = keys.filter(k => !k.revoked && new Date(k.expiresAt) > Date.now());
+    const usageResults = await Promise.all(
+      active.map(k => api("GET", "/admin/stats?key=" + encodeURIComponent(k.shareKey)).then(r => r ? r.json() : null))
+    );
+
+    let totalUsed = 0, totalCap = 0, activeCount = 0;
+
+    const tbodyRows = keys.map(k => {
+      const usageData = usageResults[active.indexOf(k)] || {};
+      const w = usageData.currentWindowUsed || 0;
+      const pct = k.tokenLimit > 0 ? Math.min(100, (w / k.tokenLimit) * 100) : 0;
+      const now = Date.now();
+      const status = k.revoked
+        ? '<span class="status revoked">Revoked</span>'
+        : now > new Date(k.expiresAt).getTime()
+          ? '<span class="status expired">Expired</span>'
+          : pct >= 100
+            ? '<span class="status exceeded">Cap hit</span>'
+            : '<span class="status active">Active</span>';
+      const ttl = now > new Date(k.expiresAt).getTime()
+        ? "expired"
+        : Math.max(0, Math.round((new Date(k.expiresAt).getTime() - now) / 3600000)) + "h left";
+
+      if (!k.revoked && now <= new Date(k.expiresAt).getTime()) {
+        totalUsed += w;
+        totalCap += k.tokenLimit;
+        if (w < k.tokenLimit) activeCount++;
+      }
+
+      return `<tr>
+        <td>${esc(k.name)}</td>
+        <td><code>${esc(k.shareKey)}</code></td>
+        <td>${fmt(w)} / ${fmt(k.tokenLimit)}</td>
+        <td><div class="bar-wrap"><div class="bar" style="width:${pct.toFixed(1)}%"></div></div></td>
+        <td>${status}</td>
+        <td>${ttl}</td>
+        <td class="actions">
+          <button data-action="toggle-detail" data-key="${esc(k.shareKey)}" class="small">Details</button>
+          <button data-action="copy-key" data-key="${esc(k.shareKey)}" class="small">Copy</button>
+          <button data-action="revoke-key" data-key="${esc(k.shareKey)}" class="small danger">Revoke</button>
+        </td>
+      </tr>
+      <tr class="detail-toggle hidden" id="dt-${esc(k.shareKey)}">
+        <td colspan="7" style="padding:0;border-bottom:2px solid var(--border)">
+          <div class="detail-inner" id="dp-${esc(k.shareKey)}"><p class="detail-empty">Click Details to load</p></div>
+        </td>
+      </tr>`;
+    });
+
+    tbody.innerHTML = tbodyRows.join("");
+
+    // Update stats
+    $("s-total").textContent = keys.length;
+    $("s-active").textContent = activeCount;
+    $("s-used").textContent = fmt(totalUsed);
+    $("s-cap").textContent = fmt(totalCap);
+
+    // Window info
+    const r2 = await api("GET", "/admin/stats?key=" + encodeURIComponent(keys[0].shareKey));
+    if (r2 && r2.ok) {
+      const d = await r2.json();
+      const we = d.windowUsage || {};
+      const entries = Object.entries(we);
+      if (entries.length) {
+        const latest = entries[0];
+        $("s-reset").textContent = new Date(latest[0]).toLocaleString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" });
+      }
+    }
+  }
+
+  // ── Init ──
+  if (secret()) {
+    $("login-section").classList.add("hidden");
+    $("dashboard").classList.remove("hidden");
+    loadDashboard();
+  }
+})();
+</script>
+</body>
+</html>
