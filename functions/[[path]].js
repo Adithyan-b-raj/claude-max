@@ -340,7 +340,7 @@ async function handleAdmin(request, env, adminSecret) {
   if (request.method === "POST" && path === "/admin/create") {
     const body = await request.json().catch(() => ({}));
     const days = Math.min(30, Math.max(1, parseInt(body.days) || 1));
-    const tokenLimit = Math.min(10_000_000, Math.max(1000, parseInt(body.tokenLimit) || 100000));
+    const tokenLimit = Math.min(100_000_000, Math.max(1000, parseInt(body.tokenLimit) || 100000));
     const name = (body.name || "shared").slice(0, 50);
     const shareKey = generateKey(16);
     const now = new Date();
