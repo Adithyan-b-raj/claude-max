@@ -177,9 +177,9 @@ async function dashboard(keys, adminSecret, env) {
         <td>${status}</td>
         <td>${ttl}</td>
         <td class="actions">
-          <button onclick="toggleDetail('${escapeHtml(k.shareKey)}')">Details</button>
-          <button onclick="copyKey('${escapeHtml(k.shareKey)}')">Copy</button>
-          <button onclick="revokeKey('${escapeHtml(k.shareKey)}')" class="danger">Revoke</button>
+          <button data-action="toggle-detail" data-key="${escapeHtml(k.shareKey)}">Details</button>
+          <button data-action="copy-key" data-key="${escapeHtml(k.shareKey)}">Copy</button>
+          <button data-action="revoke-key" data-key="${escapeHtml(k.shareKey)}" class="danger">Revoke</button>
         </td>
       </tr>
       <tr class="detail-toggle" id="detail-toggle-${escapeHtml(k.shareKey)}" style="display:none">
@@ -374,15 +374,24 @@ async function dashboard(keys, adminSecret, env) {
 
     function toggleDetail(key) {
       const toggle = document.getElementById("detail-toggle-" + key);
-      const panel = document.getElementById("detail-" + key);
       if (!toggle) return;
       const hidden = toggle.style.display === "none";
       toggle.style.display = hidden ? "" : "none";
-      if (panel && !hidden) {
-        // Scroll detail into view
-        panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!hidden) {
+        document.getElementById("detail-" + key)?.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     }
+
+    // Event delegation for action buttons
+    document.addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const key = btn.dataset.key;
+      const action = btn.dataset.action;
+      if (action === "toggle-detail") toggleDetail(key);
+      else if (action === "copy-key") copyKey(key);
+      else if (action === "revoke-key") revokeKey(key);
+    });
 
     // Auto-login if secret in session
     if (sessionStorage.getItem("adminSecret")) {
