@@ -59,10 +59,12 @@
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
   th {
     text-align: center; color: var(--muted); font-weight: 500; padding: 12px 8px;
-    border-bottom: 1px solid var(--border); font-size: 0.7rem;
+    border-bottom: 1px solid var(--border); border-right: 1px solid var(--line); font-size: 0.7rem;
     text-transform: uppercase; letter-spacing: 0.08em;
   }
-  td { padding: 14px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th:last-child { border-right: none; }
+  td { padding: 14px 8px; border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); vertical-align: middle; }
+  td:last-child { border-right: none; }
   td code {
     font-size: 0.75rem; padding: 4px 8px; border: 1px solid var(--line);
     font-family: ui-monospace, monospace;
@@ -90,9 +92,11 @@
   .detail-table th {
     padding: 12px 8px; text-align: center; font-weight: 500; color: #666;
     text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.7rem;
-    border-bottom: 1px solid #000;
+    border-bottom: 1px solid #000; border-right: 1px solid #e5e5e5;
   }
-  .detail-table td { padding: 14px 8px; border-bottom: 1px solid #e5e5e5; font-family: ui-monospace, monospace; background: #fff; }
+  .detail-table th:last-child { border-right: none; }
+  .detail-table td { padding: 14px 8px; border-bottom: 1px solid #e5e5e5; border-right: 1px solid #e5e5e5; font-family: ui-monospace, monospace; background: #fff; }
+  .detail-table td:last-child { border-right: none; }
   .detail-table tr:last-child td { border-bottom: none; }
   .detail-table .num { text-align: right; }
   .detail-table .cr { color: #0052cc; font-weight: 500; }
