@@ -526,7 +526,11 @@ async function proxyRelay(request, env, ctx) {
     headers.set("X-RateLimit-Limit", String(record.tokenLimit));
     headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage - 1)));
     headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
-
+    headers.set("X-Tokens-Charged", String(total));
+    headers.set("X-Tokens-Input", String(inputTokens));
+    headers.set("X-Tokens-Output", String(outputTokens));
+    headers.set("X-Tokens-Cache-Read", String(cacheReadTokens));
+    headers.set("X-Tokens-Cache-Creation", String(cacheCreationTokens));
     return new Response(readable, { status: upstream.status, headers });
   }
 
@@ -563,6 +567,11 @@ async function proxyRelay(request, env, ctx) {
   headers.set("X-RateLimit-Limit", String(record.tokenLimit));
   headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowAfterThis)));
   headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
+  headers.set("X-Tokens-Charged", String(total));
+  headers.set("X-Tokens-Input", String(inputTokens));
+  headers.set("X-Tokens-Output", String(outputTokens));
+  headers.set("X-Tokens-Cache-Read", String(cacheReadTokens));
+  headers.set("X-Tokens-Cache-Creation", String(cacheCreationTokens));
 
   return new Response(respBody, { status: upstream.status, headers });
 }
