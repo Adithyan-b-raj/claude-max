@@ -480,6 +480,7 @@ async function proxyRelay(request, env, ctx) {
     let cacheReadTokens = 0;
     let cacheCreationTokens = 0;
     let buffer = "";
+    let totalTokens = 0;
 
     (async () => {
       try {
@@ -504,8 +505,10 @@ async function proxyRelay(request, env, ctx) {
                     outputTokens = evt.message.usage.output_tokens || 0;
                     cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
                     cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
+                    totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
                   } else if (evt.type === "message_delta" && evt.usage) {
                     outputTokens += evt.usage.output_tokens || 0;
+                    totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
                   }
                 } catch {}
               }
@@ -513,8 +516,7 @@ async function proxyRelay(request, env, ctx) {
           }
           // buffer now holds only the incomplete trailing event
         }
-        const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
-        if (total > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, total));
+        if (totalTokens > 0) ctx.waitUntil(incrementWindowUsage(env, shareKey, totalTokens));
       } catch (e) {
         // Stream interrupted — best-effort count what we have
       } finally {
@@ -524,9 +526,9 @@ async function proxyRelay(request, env, ctx) {
 
     const headers = new Headers(upstream.headers);
     headers.set("X-RateLimit-Limit", String(record.tokenLimit));
-    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage - 1)));
+    headers.set("X-RateLimit-Remaining", String(Math.max(0, record.tokenLimit - windowUsage)));
     headers.set("X-RateLimit-Reset", new Date(getCurrentWindowEnd()).toISOString());
-    headers.set("X-Tokens-Charged", String(total));
+    headers.set("X-Tokens-Charged", String(totalTokens));
     headers.set("X-Tokens-Input", String(inputTokens));
     headers.set("X-Tokens-Output", String(outputTokens));
     headers.set("X-Tokens-Cache-Read", String(cacheReadTokens));
