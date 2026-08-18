@@ -278,12 +278,12 @@ export async function onRequest(context) {
     return handleAdmin(request, env, adminSecret);
   }
 
-  // Serve dashboard.html as a static file
-  if (request.method === "GET" && path === "/dashboard.html") {
-    if (env.ASSETS) return env.ASSETS.fetch(request);
+  // Serve dashboard.html as a static asset via Pages
+  if (request.method === "GET" && path === "/dashboard.html" && env.ASSETS) {
+    return env.ASSETS.fetch(request);
   }
 
-  // Everything else: serve static files via ASSETS
+  // Everything else: serve static files
   if (env.ASSETS) return env.ASSETS.fetch(request);
 
   // Fallback

@@ -82,23 +82,24 @@
   .actions { display: flex; gap: 8px; }
   .actions button { padding: 6px 14px; font-size: 0.72rem; background: var(--bg); color: var(--text); }
 
-  /* Detail panel — THIS IS THE FIX */
-  .detail-toggle { background: var(--panel); }
-  .detail-toggle td { padding: 0; border-bottom: 2px solid var(--border); }
-  .detail-inner { padding: 16px 24px; overflow-x: auto; }
-  .detail-table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+  /* Detail panel */
+  .detail-toggle { background: #f0f0f0; }
+  .detail-toggle td { padding: 0; border-top: 2px solid #000; border-bottom: 2px solid #000; }
+  .detail-inner { padding: 16px 24px; overflow-x: auto; min-height: 50px; }
+  .detail-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; background: #fff; border: 1px solid #000; }
   .detail-table th {
-    padding: 8px 6px; text-align: left; font-weight: 500; color: var(--muted);
+    padding: 10px 8px; text-align: left; font-weight: 600; color: #000;
     text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.65rem;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 2px solid #000; background: #fff;
   }
-  .detail-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; }
+  .detail-table td { padding: 10px 8px; border-bottom: 1px solid #e5e5e5; font-family: ui-monospace, monospace; background: #fff; }
+  .detail-table tr:last-child td { border-bottom: none; }
   .detail-table .num { text-align: right; }
-  .detail-table .cr { color: #0052cc; }
-  .detail-table .cw { color: #b35900; }
+  .detail-table .cr { color: #0052cc; font-weight: 500; }
+  .detail-table .cw { color: #b35900; font-weight: 500; }
   .detail-table .tot { font-weight: 600; }
-  .detail-empty { text-align: center; color: var(--muted); padding: 16px; font-size: 0.8rem; }
-  .detail-more { color: var(--muted); font-size: 0.7rem; margin-top: 8px; text-align: center; }
+  .detail-empty { text-align: center; color: #666; padding: 20px; font-size: 0.85rem; }
+  .detail-more { color: #666; font-size: 0.7rem; margin-top: 10px; text-align: center; }
 
   /* Misc */
   .empty { color: var(--muted); text-align: center; padding: 32px; }
@@ -190,20 +191,39 @@
   function secret() { return sessionStorage.getItem("adminSecret") || ""; }
 
   async function api(method, path, body) {
-    const opts = { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + secret() } };
+    const s = secret();
+    if (!s) { showLogin(); return null; }
+    const opts = { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + s } };
     if (body) opts.body = JSON.stringify(body);
     const r = await fetch(BASE + path, opts);
-    if (r.status === 401) { sessionStorage.removeItem("adminSecret"); location.reload(); return; }
+    if (r.status === 401) { sessionStorage.removeItem("adminSecret"); showLogin(); return null; }
+    if (!r.ok) { const d = await r.text(); console.error("API error", r.status, d); return null; }
     return r;
   }
 
+  function showLogin() {
+    $("login-section").classList.remove("hidden");
+    $("dashboard").classList.add("hidden");
+  }
+
   // ── Login ──
-  $("login-form").addEventListener("submit", e => {
+  $("login-form").addEventListener("submit", async e => {
     e.preventDefault();
     const v = $("secret").value.trim();
     if (!v) return;
+    // Validate secret by hitting the API
+    const r = await fetch(BASE + "/admin/keys", {
+      headers: { Authorization: "Bearer " + v }
+    });
+    if (r.status === 401) {
+      $("login-error").textContent = "Wrong secret";
+      $("login-error").style.display = "";
+      return;
+    }
     sessionStorage.setItem("adminSecret", v);
-    location.reload();
+    $("login-section").classList.add("hidden");
+    $("dashboard").classList.remove("hidden");
+    loadDashboard();
   });
 
   // ── Create key ──
@@ -369,9 +389,9 @@
 
   // ── Init ──
   if (secret()) {
-    $("login-section").classList.add("hidden");
-    $("dashboard").classList.remove("hidden");
-    loadDashboard();
+    showLogin(); // verify and load
+    $("secret").value = sessionStorage.getItem("adminSecret") || "";
+    $("login-form").dispatchEvent(new Event("submit"));
   }
 })();
 </script>
