@@ -266,6 +266,18 @@ export async function onRequest(context) {
     return proxyRelay(request, env, context);
   }
 
+  // Model discovery — required by Claude Code for model listing
+  if (path === "/v1/models" && request.method === "GET") {
+    return json({
+      object: "list",
+      data: [
+        { id: "claude-opus-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Opus 5" },
+        { id: "claude-sonnet-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Sonnet 5" },
+        { id: "claude-haiku-4-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Haiku 4.5" },
+      ],
+    });
+  }
+
   // Health check
   if (path === "/health" && request.method === "GET") {
     return json({ status: "ok" });
