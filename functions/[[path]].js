@@ -266,16 +266,15 @@ export async function onRequest(context) {
     return proxyRelay(request, env, context);
   }
 
-  // Model discovery — required by Claude Code for model listing
+  // Model discovery — proxy to upstream so it reflects actual available models
   if (path === "/v1/models" && request.method === "GET") {
-    return json({
-      object: "list",
-      data: [
-        { id: "claude-opus-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Opus 5" },
-        { id: "claude-sonnet-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Sonnet 5" },
-        { id: "claude-haiku-4-5", object: "model", created: 1700000000, owned_by: "anthropic", type: "model", display_name: "Claude Haiku 4.5" },
-      ],
+    const upstream = await fetch("https://api.opusmax.pro/v1/models", {
+      headers: { "anthropic-version": "2023-06-01", "x-api-key": env.ANTHROPIC_API_KEY },
     });
+    const body = await upstream.text();
+    const headers = new Headers(upstream.headers);
+    headers.set("content-type", "application/json");
+    return new Response(body, { status: upstream.status, headers });
   }
 
   // Health check
