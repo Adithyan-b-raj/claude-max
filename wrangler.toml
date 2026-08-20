@@ -5,7 +5,7 @@ pages_build_output_dir = "."
 
 [[kv_namespaces]]
 binding = "SHARE_KV"
-id = "bacb8165a5244db2b6b86c84dc548f9d"
+id = "4bde4ce06404405bbc101afdebe66e0c"
 
 [vars]
 ENVIRONMENT = "production"
