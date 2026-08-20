@@ -80,9 +80,9 @@ async function getWindowUsage(env, shareKey) {
 async function incrementWindowUsage(env, shareKey, tokens) {
   const windowEnd = getCurrentWindowEnd();
   const bucketKey = getBucketKey(shareKey, windowEnd);
-  const current = parseInt(await env.SHARE_KV.get(bucketKey) || "0", 10);
-  const latest = parseInt(await env.SHARE_KV.get(bucketKey) || "0", 10);
-  const finalTotal = Math.max(current + tokens, latest + tokens);
+  const currentVal = await env.SHARE_KV.get(bucketKey);
+  const current = currentVal ? parseInt(currentVal, 10) : 0;
+  const finalTotal = current + tokens;
   const ttlSec = Math.max(60, Math.ceil((windowEnd + 3600000 - Date.now()) / 1000));
   await env.SHARE_KV.put(bucketKey, String(finalTotal), { expirationTtl: ttlSec });
 }
@@ -161,21 +161,25 @@ async function proxyRelay(request, env, ctx) {
           while ((eventEnd = buffer.indexOf("\n\n")) !== -1) {
             const eventText = buffer.slice(0, eventEnd);
             buffer = buffer.slice(eventEnd + 2);
-            for (const line of eventText.split("\n")) {
-              if (line.startsWith("data: ") && line.includes('"usage"')) {
-                try {
-                  const evt = JSON.parse(line.slice(6));
-                  if (evt.type === "message_start" && evt.message?.usage) {
-                    inputTokens = evt.message.usage.input_tokens || 0;
-                    outputTokens = evt.message.usage.output_tokens || 0;
-                    cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
-                    cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
-                    totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
-                  } else if (evt.type === "message_delta" && evt.usage) {
-                    outputTokens += evt.usage.output_tokens || 0;
-                    totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
-                  }
-                } catch {}
+            // Skip processing event lines if eventText doesn't contain the "usage" keyword,
+            // avoiding unnecessary splits and iterations for 99% of formatting events.
+            if (eventText.includes('"usage"')) {
+              for (const line of eventText.split("\n")) {
+                if (line.startsWith("data: ") && line.includes('"usage"')) {
+                  try {
+                    const evt = JSON.parse(line.slice(6));
+                    if (evt.type === "message_start" && evt.message?.usage) {
+                      inputTokens = evt.message.usage.input_tokens || 0;
+                      outputTokens = evt.message.usage.output_tokens || 0;
+                      cacheReadTokens = evt.message.usage.cache_read_input_tokens || 0;
+                      cacheCreationTokens = evt.message.usage.cache_creation_input_tokens || 0;
+                      totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+                    } else if (evt.type === "message_delta" && evt.usage) {
+                      outputTokens += evt.usage.output_tokens || 0;
+                      totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
+                    }
+                  } catch {}
+                }
               }
             }
           }
@@ -243,7 +247,9 @@ async function storeDetail(env, shareKey, input, output, cacheRead, cacheCreatio
   const existing = await env.SHARE_KV.get(dk);
   const arr = existing ? JSON.parse(existing) : [];
   arr.push({ timestamp: new Date().toISOString(), input, output, cacheRead, cacheCreation, total });
-  if (arr.length > 200) arr.splice(0, arr.length - 200);
+  // Keep only up to 25 items since dashboard displays only the last 20 requests.
+  // This reduces JSON payload size dramatically and saves CPU parsing/stringify time.
+  if (arr.length > 25) arr.splice(0, arr.length - 25);
   const ttl = Math.max(60, Math.ceil((winEnd + 3600000 - Date.now()) / 1000));
   await env.SHARE_KV.put(dk, JSON.stringify(arr), { expirationTtl: ttl });
 }
