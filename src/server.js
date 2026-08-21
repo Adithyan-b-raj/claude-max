@@ -87,15 +87,9 @@ function createApp() {
   // Static files
   app.use(express.static(path.join(__dirname, 'public')));
 
-  // Body parsing — skip JSON parsing for /v1/* routes (proxy passes raw body through)
-  app.use('/v1', express.raw({ type: '*/*', limit: '100mb' }));
-  app.use((req, res, next) => {
-    if (req.path.startsWith('/v1')) return next();
-    express.json()(req, res, (err) => {
-      if (err) return next(err);
-      express.urlencoded({ extended: true })(req, res, next);
-    });
-  });
+  // Body parsing
+  app.use(express.json({ limit: '100mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
   // Request timeout middleware
   app.use((req, res, next) => {
@@ -153,10 +147,9 @@ function createApp() {
       }, 429);
     }
 
-    // Raw body — passed through without parsing
-    const body = req.body;
+    const body = JSON.stringify(req.body);
     let isStream = false;
-    try { isStream = JSON.parse(body).stream === true; } catch { }
+    try { isStream = req.body?.stream === true; } catch { }
 
     try {
       // Forward all anthropic-* headers from the client (prompt caching, beta features, etc.)
@@ -328,7 +321,7 @@ function createApp() {
       const upstreamResp = await fetch(`${ANTHROPIC_API}${req.path.slice(3)}`, {
         method: req.method,
         headers: catchallHeaders,
-        body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? req.body : undefined,
+        body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? JSON.stringify(req.body) : undefined,
       });
       res.status(upstreamResp.status);
       const ct = upstreamResp.headers.get('content-type');
