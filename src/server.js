@@ -11,8 +11,7 @@ const db = require('./lib/db.js');
 
 // --- Constants ---
 const WINDOW_MS = 5 * 60 * 60 * 1000; // 5-hour rolling window
-const WINDOW_ANCHOR_HOURS = 18;
-const WINDOW_ANCHOR_MINUTES = 28;
+const ANCHOR_EPOCH = Date.UTC(2026, 0, 1, 18, 28, 0, 0); // Anchored to 18:28 UTC (11:58 PM IST)
 const ANTHROPIC_API = 'https://api.opusmax.pro/v1';
 const ADMIN_LOGIN_LIMIT = 5;
 const ADMIN_LOGIN_WINDOW_SEC = 60;
@@ -30,15 +29,9 @@ function addCorsHeaders(res) {
 }
 
 function getCurrentWindowEnd() {
-  const now = new Date();
-  const anchor = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-    WINDOW_ANCHOR_HOURS, WINDOW_ANCHOR_MINUTES, 0, 0
-  ));
-  if (now <= anchor) return anchor.getTime();
-  const elapsed = now - anchor;
-  const periods = Math.ceil(elapsed / WINDOW_MS);
-  return anchor.getTime() + periods * WINDOW_MS;
+  const now = Date.now();
+  const periods = Math.floor((now - ANCHOR_EPOCH) / WINDOW_MS) + 1;
+  return ANCHOR_EPOCH + periods * WINDOW_MS;
 }
 
 function generateKey(length) {
