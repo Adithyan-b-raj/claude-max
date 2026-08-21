@@ -306,7 +306,9 @@ function createApp() {
   });
 
   // --- Generic /v1/* catch-all proxy (handles /v1/messages/count_tokens etc.) ---
-  app.all('/v1/*', async (req, res) => {
+  app.use('/v1', async (req, res, next) => {
+    // Skip if already handled by specific routes above
+    if (res.headersSent) return next();
     try {
       const catchallHeaders = {
         'Content-Type': req.header('content-type') || 'application/json',
@@ -318,7 +320,7 @@ function createApp() {
           catchallHeaders[key] = val;
         }
       }
-      const upstreamResp = await fetch(`${ANTHROPIC_API}${req.path.slice(3)}`, {
+      const upstreamResp = await fetch(`${ANTHROPIC_API}${req.path}`, {
         method: req.method,
         headers: catchallHeaders,
         body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? JSON.stringify(req.body) : undefined,
