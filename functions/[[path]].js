@@ -55,18 +55,26 @@ async function recordLoginSuccess(env, ip) {
   await env.SHARE_KV.delete(`loginfail:${ip}`);
 }
 
+async function getShareIndex(env) {
+  let raw = await env.SHARE_KV.get("share:index", "json");
+  if (typeof raw === "string") {
+    try { raw = JSON.parse(raw); } catch { raw = []; }
+  }
+  return Array.isArray(raw) ? raw : [];
+}
+
 async function getShare(env, key) {
   return env.SHARE_KV.get(getShareKey(key), "json");
 }
 
 async function deleteShare(env, key) {
   await env.SHARE_KV.delete(getShareKey(key));
-  const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+  const index = await getShareIndex(env);
   await env.SHARE_KV.put("share:index", JSON.stringify(index.filter(k => k !== key)));
 }
 
 async function addToIndex(env, key) {
-  const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+  const index = await getShareIndex(env);
   if (!index.includes(key)) {
     await env.SHARE_KV.put("share:index", JSON.stringify([...index, key]));
   }
@@ -392,7 +400,7 @@ async function handleAdmin(request, env, adminSecret) {
 
   // List keys
   if (request.method === "GET" && path === "/admin/keys") {
-    const index = (await env.SHARE_KV.get("share:index", "json")) || [];
+    const index = await getShareIndex(env);
     const rawShares = await Promise.all(index.map(k => getShare(env, k)));
     const keys = [];
     for (let i = 0; i < index.length; i++) {
