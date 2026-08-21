@@ -103,10 +103,13 @@ function createApp() {
     next();
   });
 
-  // --- CORS preflight ---
-  app.options('*', (req, res) => {
-    addCorsHeaders(res);
-    res.status(204).send('');
+  // --- CORS headers on every response ---
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization,Content-Type,X-Share-Key');
+    if (req.method === 'OPTIONS') return res.status(204).end();
+    next();
   });
 
   // --- GET /health ---
@@ -484,7 +487,7 @@ async function startServer() {
 
   // Create and start Express app
   const app = createApp();
-  const server = app.listen(PORT, '127.0.0.1', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`OpusMax Proxy listening on http://127.0.0.1:${PORT}`);
   });
 
