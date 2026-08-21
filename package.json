@@ -10,9 +10,9 @@
     "db:clean": "node -e \"const { execSync } = require('child_process'); try { execSync('rm -f data/opusmax.db data/opusmax.db-wal data/opusmax.db-shm', {stdio:'ignore'}); console.log('Database removed'); } catch(e) { console.log('No database to remove'); }\""
   },
   "dependencies": {
-    "express": "^5.2.1",
     "better-sqlite3": "^13.0.3",
-    "dotenv": "^16.5.0"
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1"
   },
   "engines": {
     "node": ">=20.0.0"
