@@ -69,7 +69,7 @@ function setRateLimitHeaders(res, record, windowUsage, total) {
 }
 
 function copyAllowedHeaders(src, dest) {
-  const allowed = ['content-type', 'date', 'cache-control', 'retry-after', 'x-request-id'];
+  const allowed = ['content-type', 'content-length', 'date', 'cache-control', 'retry-after', 'x-request-id', 'transfer-encoding'];
   src.headers.forEach((val, key) => {
     if (allowed.includes(key.toLowerCase())) {
       dest.setHeader(key, val);
