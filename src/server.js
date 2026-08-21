@@ -87,9 +87,15 @@ function createApp() {
   // Static files
   app.use(express.static(path.join(__dirname, 'public')));
 
-  // Body parsing
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  // Body parsing — skip JSON parsing for /v1/* routes (proxy passes raw body through)
+  app.use('/v1', express.raw({ type: '*/*', limit: '100mb' }));
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/v1')) return next();
+    express.json()(req, res, (err) => {
+      if (err) return next(err);
+      express.urlencoded({ extended: true })(req, res, next);
+    });
+  });
 
   // Request timeout middleware
   app.use((req, res, next) => {
@@ -147,18 +153,27 @@ function createApp() {
       }, 429);
     }
 
-    const body = JSON.stringify(req.body);
+    // Raw body — passed through without parsing
+    const body = req.body;
     let isStream = false;
-    try { isStream = JSON.parse(body).stream === true; } catch {}
+    try { isStream = JSON.parse(body).stream === true; } catch { }
 
     try {
+      // Forward all anthropic-* headers from the client (prompt caching, beta features, etc.)
+      const upstreamHeaders = {
+        'Content-Type': req.header('content-type') || 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',  // default fallback
+      };
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (key.toLowerCase().startsWith('anthropic-')) {
+          upstreamHeaders[key] = val;
+        }
+      }
+
       const upstream = await fetch(`${ANTHROPIC_API}/messages`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
+        headers: upstreamHeaders,
         body,
       });
 
@@ -218,7 +233,7 @@ function createApp() {
                           outputTokens += evt.usage.output_tokens || 0;
                           totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
                         }
-                      } catch {}
+                      } catch { }
                     }
                   }
                 }
@@ -251,7 +266,7 @@ function createApp() {
           cacheReadTokens = parsed.usage.cache_read_input_tokens || 0;
           cacheCreationTokens = parsed.usage.cache_creation_input_tokens || 0;
         }
-      } catch {}
+      } catch { }
 
       const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
 
@@ -293,6 +308,36 @@ function createApp() {
       res.send(body);
     } catch (err) {
       console.error('Models proxy error:', err.message);
+      json(res, { error: 'Upstream request failed' }, 502);
+    }
+  });
+
+  // --- Generic /v1/* catch-all proxy (handles /v1/messages/count_tokens etc.) ---
+  app.all('/v1/*', async (req, res) => {
+    try {
+      const catchallHeaders = {
+        'Content-Type': req.header('content-type') || 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      };
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (key.toLowerCase().startsWith('anthropic-')) {
+          catchallHeaders[key] = val;
+        }
+      }
+      const upstreamResp = await fetch(`${ANTHROPIC_API}${req.path.slice(3)}`, {
+        method: req.method,
+        headers: catchallHeaders,
+        body: ['POST', 'PUT', 'PATCH'].includes(req.method) ? req.body : undefined,
+      });
+      res.status(upstreamResp.status);
+      const ct = upstreamResp.headers.get('content-type');
+      if (ct) res.setHeader('Content-Type', ct);
+      addCorsHeaders(res);
+      const respBody = await upstreamResp.text();
+      res.send(respBody);
+    } catch (err) {
+      console.error('Catch-all proxy error:', err.message);
       json(res, { error: 'Upstream request failed' }, 502);
     }
   });

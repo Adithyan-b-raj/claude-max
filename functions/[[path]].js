@@ -123,15 +123,23 @@ async function proxyRelay(request, env, ctx) {
 
   const body = await request.text();
   let isStream = false;
-  try { isStream = JSON.parse(body).stream === true; } catch {}
+  try { isStream = JSON.parse(body).stream === true; } catch { }
+
+  // Forward all anthropic-* headers from the client (prompt caching, beta features, etc.)
+  const upstreamHeaders = {
+    "Content-Type": "application/json",
+    "x-api-key": env.ANTHROPIC_API_KEY,
+    "anthropic-version": "2023-06-01",  // default fallback
+  };
+  for (const [key, val] of request.headers) {
+    if (key.toLowerCase().startsWith("anthropic-")) {
+      upstreamHeaders[key] = val;
+    }
+  }
 
   const upstream = await fetch("https://api.opusmax.pro/v1/messages", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
+    headers: upstreamHeaders,
     body,
   });
 
@@ -178,7 +186,7 @@ async function proxyRelay(request, env, ctx) {
                       outputTokens += evt.usage.output_tokens || 0;
                       totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
                     }
-                  } catch {}
+                  } catch { }
                 }
               }
             }
@@ -215,7 +223,7 @@ async function proxyRelay(request, env, ctx) {
       cacheReadTokens = parsed.usage.cache_read_input_tokens || 0;
       cacheCreationTokens = parsed.usage.cache_creation_input_tokens || 0;
     }
-  } catch {}
+  } catch { }
 
   const total = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens;
 
@@ -281,6 +289,29 @@ export async function onRequest(context) {
     const headers = new Headers(upstream.headers);
     headers.set("content-type", "application/json");
     return new Response(body, { status: upstream.status, headers });
+  }
+
+  // Generic /v1/* catch-all proxy — handles /v1/messages/count_tokens and other sub-endpoints
+  if (path.startsWith("/v1/") && (request.method === "POST" || request.method === "GET")) {
+    const catchallHeaders = {
+      "Content-Type": request.headers.get("content-type") || "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    };
+    for (const [key, val] of request.headers) {
+      if (key.toLowerCase().startsWith("anthropic-")) {
+        catchallHeaders[key] = val;
+      }
+    }
+    const catchallResp = await fetch(`https://api.opusmax.pro${path}`, {
+      method: request.method,
+      headers: catchallHeaders,
+      body: request.method === "POST" ? await request.text() : undefined,
+    });
+    return new Response(catchallResp.body, {
+      status: catchallResp.status,
+      headers: catchallResp.headers,
+    });
   }
 
   // Health check
