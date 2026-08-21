@@ -265,77 +265,95 @@ async function storeDetail(env, shareKey, input, output, cacheRead, cacheCreatio
 // ===========================================================================
 // Pages Function entry point
 // ===========================================================================
+// ===========================================================================
+// Pages Function entry point
+// ===========================================================================
 export async function onRequest(context) {
-  const { request, env } = context;
-  const url = new URL(request.url);
-  const path = url.pathname;
+  try {
+    const { request, env } = context;
+    const url = new URL(request.url);
+    const path = url.pathname;
 
-  // CORS preflight
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
-  }
-
-  // Proxy relay
-  if (path === "/v1/messages" && request.method === "POST") {
-    return proxyRelay(request, env, context);
-  }
-
-  // Model discovery — proxy to upstream so it reflects actual available models
-  if (path === "/v1/models" && request.method === "GET") {
-    const upstream = await fetch("https://api.opusmax.pro/v1/models", {
-      headers: { "anthropic-version": "2023-06-01", "x-api-key": env.ANTHROPIC_API_KEY },
-    });
-    const body = await upstream.text();
-    const headers = new Headers(upstream.headers);
-    headers.set("content-type", "application/json");
-    return new Response(body, { status: upstream.status, headers });
-  }
-
-  // Generic /v1/* catch-all proxy — handles /v1/messages/count_tokens and other sub-endpoints
-  if (path.startsWith("/v1/") && (request.method === "POST" || request.method === "GET")) {
-    const catchallHeaders = {
-      "Content-Type": request.headers.get("content-type") || "application/json",
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    };
-    for (const [key, val] of request.headers) {
-      if (key.toLowerCase().startsWith("anthropic-")) {
-        catchallHeaders[key] = val;
-      }
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
-    const catchallResp = await fetch(`https://api.opusmax.pro${path}`, {
-      method: request.method,
-      headers: catchallHeaders,
-      body: request.method === "POST" ? await request.text() : undefined,
-    });
-    return new Response(catchallResp.body, {
-      status: catchallResp.status,
-      headers: catchallResp.headers,
-    });
+
+    if (!env.SHARE_KV) {
+      return json({ error: "SHARE_KV KV namespace is not bound. Please attach SHARE_KV in Cloudflare Pages Settings -> Functions -> KV namespace bindings." }, 500);
+    }
+
+    // Proxy relay
+    if (path === "/v1/messages" && request.method === "POST") {
+      return await proxyRelay(request, env, context);
+    }
+
+    // Model discovery — proxy to upstream so it reflects actual available models
+    if (path === "/v1/models" && request.method === "GET") {
+      const upstream = await fetch("https://api.opusmax.pro/v1/models", {
+        headers: { "anthropic-version": "2023-06-01", "x-api-key": env.ANTHROPIC_API_KEY || "" },
+      });
+      const body = await upstream.text();
+      const headers = new Headers();
+      headers.set("content-type", "application/json");
+      Object.entries(corsHeaders).forEach(([k, v]) => headers.set(k, v));
+      return new Response(body, { status: upstream.status, headers });
+    }
+
+    // Generic /v1/* catch-all proxy — handles /v1/messages/count_tokens and other sub-endpoints
+    if (path.startsWith("/v1/") && (request.method === "POST" || request.method === "GET")) {
+      const catchallHeaders = {
+        "Content-Type": request.headers.get("content-type") || "application/json",
+        "x-api-key": env.ANTHROPIC_API_KEY || "",
+        "anthropic-version": "2023-06-01",
+      };
+      for (const [key, val] of request.headers) {
+        if (key.toLowerCase().startsWith("anthropic-")) {
+          catchallHeaders[key] = val;
+        }
+      }
+      const catchallResp = await fetch(`https://api.opusmax.pro${path}`, {
+        method: request.method,
+        headers: catchallHeaders,
+        body: request.method === "POST" ? await request.text() : undefined,
+      });
+      const respHeaders = new Headers();
+      const allowed = new Set(["content-type", "date", "cache-control", "retry-after", "x-request-id"]);
+      for (const [k, v] of catchallResp.headers) {
+        if (allowed.has(k.toLowerCase())) respHeaders.set(k, v);
+      }
+      Object.entries(corsHeaders).forEach(([k, v]) => respHeaders.set(k, v));
+      return new Response(catchallResp.body, {
+        status: catchallResp.status,
+        headers: respHeaders,
+      });
+    }
+
+    // Health check
+    if (path === "/health" && request.method === "GET") {
+      return json({ status: "ok" });
+    }
+
+    // Admin routes — serve the dashboard HTML
+    if (path.startsWith("/admin")) {
+      const adminSecret = env.ADMIN_SECRET;
+      if (!adminSecret) return json({ error: "Set ADMIN_SECRET env var in Cloudflare Pages Settings." }, 503);
+      return await handleAdmin(request, env, adminSecret);
+    }
+
+    // Serve dashboard.html as a static asset via Pages
+    if (request.method === "GET" && path === "/dashboard.html" && env.ASSETS) {
+      return env.ASSETS.fetch(request);
+    }
+
+    // Everything else: serve static files
+    if (env.ASSETS) return env.ASSETS.fetch(request);
+
+    // Fallback
+    return json({ error: "not found" }, 404);
+  } catch (err) {
+    return json({ error: err.message || "Internal Worker Error", stack: String(err.stack || err) }, 500);
   }
-
-  // Health check
-  if (path === "/health" && request.method === "GET") {
-    return json({ status: "ok" });
-  }
-
-  // Admin routes — serve the dashboard HTML
-  if (path.startsWith("/admin")) {
-    const adminSecret = env.ADMIN_SECRET;
-    if (!adminSecret) return json({ error: "Set ADMIN_SECRET env var" }, 503);
-    return handleAdmin(request, env, adminSecret);
-  }
-
-  // Serve dashboard.html as a static asset via Pages
-  if (request.method === "GET" && path === "/dashboard.html" && env.ASSETS) {
-    return env.ASSETS.fetch(request);
-  }
-
-  // Everything else: serve static files
-  if (env.ASSETS) return env.ASSETS.fetch(request);
-
-  // Fallback
-  return json({ error: "not found" }, 404);
 }
 
 // ===========================================================================
